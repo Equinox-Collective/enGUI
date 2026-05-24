@@ -1,36 +1,48 @@
 #include "api_gui.h"
+#include "lua/lauxlib.h"
+#include "lua/lua.h"
+#include "lua/lualib.h"
+#include <equos.h>
 #include <stdint.h>
 
-// Копия функции рисования строки, но теперь для Ring 3
-static int l_draw_text(lua_State *L) {
-  const char *str = luaL_checkstring(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
-  uint32_t color = (uint32_t)luaL_checknumber(L, 4);
+// Эти переменные мы объявим в main.c, а здесь просто используем
+extern uint32_t *vram;
+extern uint32_t screen_w, screen_h;
 
-  // Вызываем твой отрисовщик (который мы скопируем из ядра в этот файл)
-  draw_string_ring3(vram, str, x, y, color);
-  return 0;
-}
+// Функция очистки экрана: clearScreen(0xHEXCOLOR)
+static int l_clear_screen(lua_State *L) {
+  uint32_t color = (uint32_t)luaL_checknumber(L, 1);
 
-// Эффект блюра прямо в Ring 3! (Пиздим из gui.c)
-static int l_apply_blur(lua_State *L) {
-  int x = luaL_checkinteger(L, 1);
-  int y = luaL_checkinteger(L, 2);
-  int w = luaL_checkinteger(L, 3);
-  int h = luaL_checkinteger(L, 4);
-
-  // Твоя функция блюра теперь работает в юзерспейсе
-  for (int i = y; i < y + h; i++) {
-    for (int j = x; j < x + w; j++) {
-      // ... логика блюра ...
+  if (vram) {
+    for (uint32_t i = 0; i < screen_w * screen_h; i++) {
+      vram[i] = color;
     }
   }
   return 0;
 }
 
+static int l_draw_text(lua_State *L) {
+  const char *str = luaL_checkstring(L, 1);
+  int x = (int)luaL_checkinteger(L, 2);
+  int y = (int)luaL_checkinteger(L, 3);
+  uint32_t color = (uint32_t)luaL_checknumber(L, 4);
+
+  // TODO: Здесь будет вызов отрисовки текста в vram
+  return 0;
+}
+
+static int l_apply_blur(lua_State *L) {
+  int x = (int)luaL_checkinteger(L, 1);
+  int y = (int)luaL_checkinteger(L, 2);
+  int w = (int)luaL_checkinteger(L, 3);
+  int h = (int)luaL_checkinteger(L, 4);
+
+  // TODO: Здесь будет логика блюра в vram
+  return 0;
+}
+
 void register_gui_api(lua_State *L) {
+  lua_register(L, "clearScreen", l_clear_screen);
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "applyBlur", l_apply_blur);
-  // Добавь сюда drawRect, drawLine, drawIcon и т.д.
 }

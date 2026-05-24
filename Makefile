@@ -1,10 +1,13 @@
 CC = x86_64-elf-gcc
-AR = x86_64-elf-ar
-SDK_DIR = ../../sdk
-CFLAGS = -ffreestanding -fno-stack-protector -fno-pie -mno-red-zone \
-		-I$(SDK_DIR)/include -Ilua -O2
+LD = x86_64-elf-ld
 
-LDFLAGS = -T $(SDK_DIR)/lib/link.ld -L$(SDK_DIR)/lib -lequos_sdk
+SDK_DIR = ../../sdk
+SDK_OBJS = $(wildcard $(SDK_DIR)/lib/*.o)
+
+CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
+		-fno-omit-frame-pointer -I$(SDK_DIR)/include -Ilua -O2 -MMD -MP
+
+LDFLAGS = -nostdlib -Ttext=0x1000000 -e _start
 
 LUA_SRCS = $(wildcard lua/l*.c)
 GUI_SRCS = main.c api_gui.c
@@ -15,10 +18,18 @@ GUI_OBJS = $(GUI_SRCS:.c=.o)
 all: sysgui.elf
 
 sysgui.elf: $(LUA_OBJS) $(GUI_OBJS)
-	$(CC) $(LUA_OBJS) $(GUI_OBJS) -o $@ $(CFLAGS) $(LDFLAGS)
+	$(LD) $(LDFLAGS) $(SDK_OBJS) $(LUA_OBJS) $(GUI_OBJS) -o $@
 
 %.o: %.c
-	$(CC) -c $< -o $@ $(CFLAGS)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+ifeq ($(OS),Windows_NT)
+    RM = del /f /q
+    CLEAN_FILES = $(subst /,\,$(LUA_OBJS) $(GUI_OBJS) sysgui.elf)
+else
+    RM = rm -f
+    CLEAN_FILES = $(LUA_OBJS) $(GUI_OBJS) sysgui.elf
+endif
 
 clean:
-	rm -f $(LUA_OBJS) $(GUI_OBJS) sysgui.elf
+	-$(RM) $(CLEAN_FILES)
