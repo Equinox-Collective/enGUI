@@ -80,7 +80,15 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  const uint32_t TICK_MS = 10;
+  /*
+   * SYS_GET_TIME returns `tick * 10`. With the kernel's PIT initialised at
+   * 50 Hz (`init_timer(50)` in EquinoxOS' kernel.c), one PIT tick = 20 ms,
+   * so one returned unit equals 2 ms of wall-clock time — not 10 ms.
+   * Using TICK_MS = 10 made `dt` 5× too large, so the slide-in animation
+   * in init.lua played in ~60 ms instead of its declared 300 ms and looked
+   * snappy/janky rather than smooth.
+   */
+  const uint32_t TICK_MS = 2;
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
   uint8_t last_key = 0;
@@ -146,7 +154,20 @@ int main(int argc, char **argv) {
     }
 
     last_tick = now;
-    sys_sleep(16);
+
+    /*
+     * `sys_sleep(16)` actually sleeps ≥ 40 ms — SYS_SLEEP waits until
+     * `(tick*10) >= start + ms`, which at 50 Hz resolves to a 2-tick
+     * minimum. That capped the loop at ~25 FPS even when the backbuffer
+     * blit was the only real work.
+     *
+     * Use `sys_yield()` instead: when no redraw is needed (`need_redraw`
+     * false) we skip rendering anyway, so the loop is cheap; when an
+     * animation is active we want to go as fast as the PIT-driven
+     * preemptive scheduler will let us (one quantum per frame ≈ 50 FPS
+     * cap), not be artificially throttled.
+     */
+    sys_yield();
   }
 
   lua_close(L);
