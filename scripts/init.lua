@@ -335,12 +335,17 @@ local function draw_notepad(win, mx, my, mdown, dt)
 end
 
 -- --- ИНИЦИАЛИЗАЦИЯ ИКОНОК И ОКОН ---
+-- Иконки рабочего стола.
+--   win_title  → клик открывает / фокусирует встроенное Lua-окно.
+--   exec       → клик запускает внешний ELF через системный вызов.
+-- Эти два поля взаимоисключающи; обработчик кликов смотрит сначала на exec.
 local desktop_icons = {
     { label = "Terminal", icon_col = 0x1E1E24, text = ">_", win_title = "Equinox Terminal" },
     { label = "Monitor",  icon_col = 0x0078D7, text = "M",  win_title = "System Monitor" },
     { label = "Paint",    icon_col = 0xFF6B00, text = "P",  win_title = "Vector Paint Brush" },
     { label = "Explorer", icon_col = 0xF0C040, text = "E",  win_title = "VFS File Explorer" },
     { label = "Notepad",  icon_col = 0x2B579A, text = "N",  win_title = "Notepad Text Editor" },
+    { label = "Doom",     icon_col = 0x8B0000, text = "D",  exec = "bin/doom.elf" },
 }
 
 -- Инициализируем объекты окон
@@ -415,22 +420,28 @@ function on_tick(dt)
         drawText(icon.text, ix + 18, iy + 16, 0xFFFFFF)
         drawText(icon.label, ix + 2, iy + 52, 0xD8DEE9)
 
-        -- Клик на иконку рабочего стола открывает окно
+        -- Клик на иконку рабочего стола.
+        -- Если у иконки задан exec — запускаем внешний ELF (например, Doom);
+        -- иначе ищем по win_title встроенное Lua-окно и фокусируем его.
         if mx >= ix and mx < ix + 48 and my >= iy and my < iy + 64 then
             if mdown and not last_mdown then
-                for _, win in ipairs(windows) do
-                    if win.title == icon.win_title then
-                        win.active = true
-                        focused_window = win
-                        -- Выводим окно наверх стопки отрисовки
-                        for k, w in ipairs(windows) do
-                            if w == win then
-                                table.remove(windows, k)
-                                break
+                if icon.exec then
+                    exec(icon.exec)
+                elseif icon.win_title then
+                    for _, win in ipairs(windows) do
+                        if win.title == icon.win_title then
+                            win.active = true
+                            focused_window = win
+                            -- Выводим окно наверх стопки отрисовки
+                            for k, w in ipairs(windows) do
+                                if w == win then
+                                    table.remove(windows, k)
+                                    break
+                                end
                             end
+                            table.insert(windows, win)
+                            break
                         end
-                        table.insert(windows, win)
-                        break
                     end
                 end
             end
