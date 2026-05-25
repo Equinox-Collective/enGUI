@@ -115,10 +115,6 @@ Pull requests are welcome. Please keep:
 - Lua code compatible with the vendored Lua 5.4 build.
 - Comments either in English or matching the surrounding style (existing code mixes English and Russian).
 
-## License
-
-[MIT](LICENSE) © Equinox Collective
-
 ---
 
 ## Русская версия
@@ -170,7 +166,3 @@ function on_tick(dt)
     end
 end
 ```
-
-### Лицензия
-
-[MIT](LICENSE) © Equinox Collective
