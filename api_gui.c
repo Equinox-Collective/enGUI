@@ -1,7 +1,7 @@
 #include "api_gui.h"
-#include "lauxlib.h"
-#include "lua.h"
-#include "lualib.h"
+#include "lua/lauxlib.h"
+#include "lua/lua.h"
+#include "lua/lualib.h"
 #include <eid.h>
 #include <eid_ext.h>
 #include <equos.h>
@@ -18,6 +18,15 @@ extern eid_ctx_t eid_ctx;
 #define MAX_ANIMS 32
 static eid_anim_t anims[MAX_ANIMS];
 static int anim_count = 0;
+
+bool is_any_anim_active(void) {
+  for (int i = 0; i < anim_count; i++) {
+    if (anims[i].active) {
+      return true;
+    }
+  }
+  return false;
+}
 
 static int l_anim_create(lua_State *L) {
   float duration = (float)luaL_checknumber(L, 1);
@@ -62,7 +71,6 @@ static int l_anim_eval(lua_State *L) {
   return 1;
 }
 
-// Теперь используем eid_draw_text из <eid.h>!
 static int l_draw_text(lua_State *L) {
   const char *str = luaL_checkstring(L, 1);
   int x = luaL_checkinteger(L, 2);
@@ -159,6 +167,29 @@ static int l_text_input(lua_State *L) {
   return 2;
 }
 
+static int l_exec(lua_State *L) {
+  const char *cmd = luaL_checkstring(L, 1);
+  int ret = sys_exec(cmd);
+  lua_pushinteger(L, ret);
+  return 1;
+}
+
+// Получить системное время (uptime в секундах)
+static int l_get_uptime(lua_State *L) {
+  uint32_t ms = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+  lua_pushnumber(L, (double)ms / 1000.0);
+  return 1;
+}
+
+// Получить системную память ядра (used, total)
+static int l_get_mem_info(lua_State *L) {
+  uint64_t used = sys_get_used_mem();
+  uint64_t total = sys_get_total_mem();
+  lua_pushnumber(L, (double)used);
+  lua_pushnumber(L, (double)total);
+  return 2;
+}
+
 void register_gui_api(lua_State *L) {
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
@@ -172,13 +203,7 @@ void register_gui_api(lua_State *L) {
   lua_register(L, "button", l_button);
   lua_register(L, "checkbox", l_checkbox);
   lua_register(L, "slider", l_slider);
-}
-
-bool is_any_anim_active(void) {
-  for (int i = 0; i < anim_count; i++) {
-    if (anims[i].active) {
-      return true;
-    }
-  }
-  return false;
+  lua_register(L, "exec", l_exec);
+  lua_register(L, "getUptime", l_get_uptime);
+  lua_register(L, "getMemInfo", l_get_mem_info);
 }

@@ -1,62 +1,116 @@
--- enGUI: Lua System UI
-print("enGUI: init.lua started successfully!")
+-- Equinox OS: Desktop Environment
+print("enGUI: Desktop Environment starting...")
 
--- Хранилище настроек
-local settings = {
-    enable_wifi = false,
-    enable_blur = true,
-    volume = 0.5,
+-- Конфигурация ярлыков приложений
+local apps = {
+    { name = "Doom Game",   bin = "bin/doom.elf",       color = 0xDE3E3E },
+    { name = "Classic Snake", bin = "bin/snake.elf",     color = 0x4CAF50 },
+    { name = "Widget Demo", bin = "bin/widget_demo.elf", color = 0x2196F3 },
+    { name = "BMP Viewer",  bin = "bin/bmpview.elf",     color = 0xFF9800 },
+    { name = "HTML Viewer", bin = "bin/htmlview.elf",    color = 0x9C27B0 },
 }
 
--- Инициализируем анимацию выезжающей панели
--- Длительность 300мс, Ease Out Cubic (тип 3)
-local panel_anim = animCreate(300.0, 3) 
-animTo(panel_anim, 1.0) -- Начинаем анимацию открытия (от 0 до 1)
+-- Инициализация анимации для выдвижного меню "Пуск" (длительность 200мс, Ease Out Cubic)
+local start_menu_anim = animCreate(200.0, 3)
+local is_menu_open = false
+local menu_anim_target = 0.0
 
--- Функция срабатывает каждые ~16мс
 function on_tick(dt)
-    -- Шагаем анимацию
-    animStep(panel_anim, dt)
-    local t = animEval(panel_anim)
+    -- 1. Шаг анимации меню "Пуск"
+    animStep(start_menu_anim, dt)
+    local menu_progress = animEval(start_menu_anim)
 
-    -- Очищаем экран (красивый темный фон)
-    drawRect(0, 0, 1024, 768, 0x14161B)
+    -- 2. Очистка экрана (Красивый глубокий градиент обоев рабочего стола)
+    drawGradient(0, 0, 1024, 728, 0x141721, 0x0B0C10, true)
 
-    -- Вычисляем положение выезжающей боковой панели (выезжает слева)
-    local panel_w = 320
-    local panel_x = math.floor((t - 1.0) * panel_w)
+    -- 3. Рисуем сетку ярлыков на рабочем столе
+    local icon_w, icon_h = 130, 80
+    local start_x, start_y = 30, 30
+    local spacing_x, spacing_y = 150, 100
 
-    -- Рисуем фон панели градиентом
-    drawGradient(panel_x, 0, panel_w, 768, 0x1E222B, 0x15181F, true)
+    for i, app in ipairs(apps) do
+        local col = (i - 1) % 4
+        local row = math.floor((i - 1) / 4)
+        local x = start_x + col * spacing_x
+        local y = start_y + row * spacing_y
 
-    -- Текст заголовка
-    drawText("Equinox Control Center", panel_x + 20, 30, 0xFFFFFF)
-    drawRect(panel_x, 65, panel_w, 1, 0x2A2E3D) -- Разделительная линия
-
-    -- 1. Чекбоксы (Возвращают новое состояние!)
-    settings.enable_wifi = checkbox("Enable Wi-Fi Network", panel_x + 20, 90, settings.enable_wifi)
-    settings.enable_blur = checkbox("Enable Glass Blur Effect", panel_x + 20, 130, settings.enable_blur)
-
-    -- 2. Слайдер громкости
-    drawText("System Volume", panel_x + 20, 180, 0x8A8E9B)
-    settings.volume = slider("vol_slider", panel_x + 20, 205, 260, settings.volume, 0.0, 1.0)
-
-    -- 3. Кнопка сброса настроек
-    if button("Reset Options", panel_x + 20, 260, 140, 30) then
-        settings.enable_wifi = false
-        settings.enable_blur = true
-        settings.volume = 0.5
-        -- Перезапускаем анимацию панели для вау-эффекта
-        animTo(panel_anim, 0.0)
-        -- И через секунду открываем обратно
-        -- (Для сложных таймеров можно сделать логику в Lua)
-        animTo(panel_anim, 1.0)
+        -- Декоративная иконка-прямоугольник
+        drawRect(x, y, icon_w, icon_h, 0x1A1D24)
+        drawRect(x, y, icon_w, 4, app.color) -- Цветовой акцент приложения
+        
+        -- Кнопка запуска
+        if button(app.name, x + 10, y + 20, icon_w - 20, 40) then
+            print("Launching " .. app.bin)
+            exec(app.bin)
+        end
     end
 
-    -- Статусная строка внизу панели
-    local status = "Status: OK"
-    if settings.enable_wifi then
-        status = "Status: Connecting..."
+    -- 4. Рисуем нижнюю панель задач (Taskbar)
+    local taskbar_y = 728
+    local taskbar_h = 40
+    drawGradient(0, taskbar_y, 1024, taskbar_h, 0x1B1F2A, 0x13161E, true)
+    drawRect(0, taskbar_y, 1024, 1, 0x2E3440) -- Тонкая разделительная верхняя линия
+
+    -- 5. Обработка клика по кнопке "Пуск"
+    if button("Equinox", 10, taskbar_y + 5, 90, 30) then
+        is_menu_open = not is_menu_open
+        if is_menu_open then
+            menu_anim_target = 1.0
+        else
+            menu_anim_target = 0.0
+        end
+        animTo(start_menu_anim, menu_anim_target)
     end
-    drawText(status, panel_x + 20, 720, 0x4A8DFD)
+
+    -- 6. Отрисовка правого системного трея (Uptime / Часы + RAM)
+    -- Расчет аптайма
+    local uptime_sec = getUptime()
+    local hours = math.floor(uptime_sec / 3600)
+    local minutes = math.floor((uptime_sec % 3600) / 60)
+    local seconds = math.floor(uptime_sec % 60)
+    local clock_str = string.format("%02d:%02d:%02d", hours, minutes, seconds)
+
+    -- Расчет RAM
+    local used_mem, total_mem = getMemInfo()
+    local used_mb = math.floor(used_mem / (1024 * 1024))
+    local total_mb = math.floor(total_mem / (1024 * 1024))
+    local ram_str = string.format("RAM: %d MB / %d MB", used_mb, total_mb)
+
+    -- Выводим системную информацию на панель задач
+    drawText(ram_str, 720, taskbar_y + 14, 0x8A8E9B)
+    drawText(clock_str, 940, taskbar_y + 14, 0xD8DEE9)
+
+    -- 7. Отрисовка выдвижного меню "Пуск" (если оно частично или полностью открыто)
+    if menu_progress > 0.001 then
+        local menu_w = 260
+        local menu_h = 320
+        local menu_x = 10
+        
+        -- Плавное выдвижение снизу вверх: вычисляем Y на основе текущего прогресса анимации
+        local menu_y = math.floor(768 - (menu_progress * (768 - 400)))
+
+        -- Задний фон меню
+        drawGradient(menu_x, menu_y, menu_w, menu_h, 0x222735, 0x181B24, true)
+        drawRect(menu_x, menu_y, menu_w, 2, 0x4A8DFD) -- Тонкая синяя линия сверху
+
+        -- Текст заголовка в меню
+        drawText("EQUINOX OS MENU", menu_x + 20, menu_y + 20, 0xFFFFFF)
+        drawRect(menu_x + 20, menu_y + 45, menu_w - 40, 1, 0x2E3440) -- Разделитель
+
+        -- Список программ внутри меню
+        local list_start_y = menu_y + 60
+        for i, app in ipairs(apps) do
+            if button(app.name, menu_x + 20, list_start_y + (i-1)*38, menu_w - 40, 30) then
+                exec(app.bin)
+                -- Закрываем меню после запуска для удобства
+                is_menu_open = false
+                animTo(start_menu_anim, 0.0)
+            end
+        end
+
+        -- Нижний статус-бар в меню Пуск
+        local bar_y = menu_y + menu_h - 40
+        drawRect(menu_x, bar_y, menu_w, 1, 0x2E3440)
+        drawText("System Status: Operational", menu_x + 20, bar_y + 14, 0x4A8DFD)
+    end
 end
