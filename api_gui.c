@@ -168,7 +168,7 @@ void register_gui_api(lua_State *L) {
   lua_register(L, "animTo", l_anim_to);
   lua_register(L, "animStep", l_anim_step);
   lua_register(L, "animEval", l_anim_eval);
-
+  lua_register(L, "textInput", l_text_input);
   lua_register(L, "button", l_button);
   lua_register(L, "checkbox", l_checkbox);
   lua_register(L, "slider", l_slider);
