@@ -259,6 +259,12 @@ static int l_get_files(lua_State *L) {
   return 1;
 }
 
+static int l_get_screen_size(lua_State *L) {
+  lua_pushinteger(L, screen_w);
+  lua_pushinteger(L, screen_h);
+  return 2; // Возвращаем два значения
+}
+
 void register_gui_api(lua_State *L) {
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
@@ -283,4 +289,5 @@ void register_gui_api(lua_State *L) {
   lua_register(L, "readFile", l_read_file);
   lua_register(L, "saveFile", l_save_file);
   lua_register(L, "getFiles", l_get_files);
+  lua_register(L, "getScreenSize", l_get_screen_size);
 }
