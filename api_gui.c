@@ -9,12 +9,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdbool.h>
 
-extern uint32_t *vram;
+extern uint32_t *draw_target;
 extern uint32_t screen_w, screen_h;
 extern eid_ctx_t eid_ctx;
 
-// Простой менеджер анимаций на Си
 #define MAX_ANIMS 32
 static eid_anim_t anims[MAX_ANIMS];
 static int anim_count = 0;
@@ -77,7 +77,7 @@ static int l_draw_text(lua_State *L) {
   int y = luaL_checkinteger(L, 3);
   uint32_t color = (uint32_t)luaL_checknumber(L, 4);
 
-  eid_draw_text(vram, screen_w, screen_h, x, y, str, color);
+  eid_draw_text(draw_target, screen_w, screen_h, x, y, str, color);
   return 0;
 }
 
@@ -88,7 +88,7 @@ static int l_draw_rect(lua_State *L) {
   int h = luaL_checkinteger(L, 4);
   uint32_t color = (uint32_t)luaL_checknumber(L, 5);
 
-  eid_draw_rect(vram, screen_w, screen_h, x, y, w, h, color);
+  eid_draw_rect(draw_target, screen_w, screen_h, x, y, w, h, color);
   return 0;
 }
 
@@ -101,8 +101,19 @@ static int l_draw_gradient(lua_State *L) {
   uint32_t c2 = (uint32_t)luaL_checknumber(L, 6);
   bool vertical = lua_toboolean(L, 7);
 
-  eid_draw_gradient_rect(vram, screen_w, screen_h, x, y, w, h, c1, c2,
+  eid_draw_gradient_rect(draw_target, screen_w, screen_h, x, y, w, h, c1, c2,
                          vertical);
+  return 0;
+}
+
+static int l_draw_line(lua_State *L) {
+  int x1 = luaL_checkinteger(L, 1);
+  int y1 = luaL_checkinteger(L, 2);
+  int x2 = luaL_checkinteger(L, 3);
+  int y2 = luaL_checkinteger(L, 4);
+  uint32_t color = (uint32_t)luaL_checknumber(L, 5);
+
+  eid_draw_line(draw_target, screen_w, screen_h, x1, y1, x2, y2, color);
   return 0;
 }
 
@@ -143,30 +154,6 @@ static int l_slider(lua_State *L) {
   return 1;
 }
 
-static int l_text_input(lua_State *L) {
-  const char *label = luaL_checkstring(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
-  int w = luaL_checkinteger(L, 4);
-  int h = luaL_checkinteger(L, 5);
-  const char *curr_val = luaL_checkstring(L, 6);
-  int max_len = luaL_checkinteger(L, 7);
-
-  char buf[256];
-  strncpy(buf, curr_val, sizeof(buf));
-  buf[sizeof(buf) - 1] = '\0';
-
-  // Вызываем виджет
-  uint32_t state =
-      eid_text_input(&eid_ctx, label, x, y, w, h, buf,
-                     (max_len < sizeof(buf)) ? max_len : sizeof(buf));
-
-  // Возвращаем измененную строку и флаг фокуса
-  lua_pushstring(L, buf);
-  lua_pushboolean(L, (state & EID_STATE_FOCUSED) != 0);
-  return 2;
-}
-
 static int l_exec(lua_State *L) {
   const char *cmd = luaL_checkstring(L, 1);
   int ret = sys_exec(cmd);
@@ -174,14 +161,12 @@ static int l_exec(lua_State *L) {
   return 1;
 }
 
-// Получить системное время (uptime в секундах)
 static int l_get_uptime(lua_State *L) {
   uint32_t ms = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
   lua_pushnumber(L, (double)ms / 1000.0);
   return 1;
 }
 
-// Получить системную память ядра (used, total)
 static int l_get_mem_info(lua_State *L) {
   uint64_t used = sys_get_used_mem();
   uint64_t total = sys_get_total_mem();
@@ -190,20 +175,109 @@ static int l_get_mem_info(lua_State *L) {
   return 2;
 }
 
+static int l_get_mouse(lua_State *L) {
+  lua_pushinteger(L, eid_ctx.mx);
+  lua_pushinteger(L, eid_ctx.my);
+  lua_pushboolean(L, eid_ctx.m_down);
+  return 3;
+}
+
+static int l_get_last_key(lua_State *L) {
+  lua_pushinteger(L, eid_ctx.last_key);
+  eid_ctx.last_key = 0; // Сбрасываем сканкод
+  return 1;
+}
+
+static int l_scancode_to_ascii(lua_State *L) {
+  int sc = luaL_checkinteger(L, 1);
+  bool shift = lua_toboolean(L, 2);
+  char c = eid_scancode_to_ascii((uint8_t)sc, shift);
+  char str[2] = {c, 0};
+  lua_pushstring(L, str);
+  return 1;
+}
+
+static int l_read_file(lua_State *L) {
+  const char *filename = luaL_checkstring(L, 1);
+  uint32_t size = 0;
+  uint64_t addr =
+      _syscall(SYS_READ_FILE, (uint64_t)filename, (uint64_t)&size, 0, 0, 0);
+  if (addr && size > 0) {
+    lua_pushlstring(L, (const char *)addr, size);
+  } else {
+    lua_pushnil(L);
+  }
+  return 1;
+}
+
+static int l_save_file(lua_State *L) {
+  const char *filename = luaL_checkstring(L, 1);
+  const char *data = luaL_checkstring(L, 2);
+  int len = (int)strlen(data);
+  write_file(filename, (void *)data, len);
+  return 0;
+}
+
+static int l_get_files(lua_State *L) {
+  lua_newtable(L);
+  int idx = 1;
+
+  // Локальный буфер в пространстве пользователя
+  struct {
+    char name[128];
+    uint32_t size;
+    char dev[32];
+  } entry;
+
+  for (int i = 0;; i++) {
+    // Делаем системный вызов SYS_READ_DIR
+    // Передаем индекс файла `i` и адрес буфера `entry`
+    uint64_t ret = _syscall(SYS_READ_DIR, i, (uint64_t)&entry, 0, 0, 0);
+    if (!ret) {
+      break; // Если ядро вернуло 0, значит, файлы закончились
+    }
+
+    lua_newtable(L);
+
+    lua_pushstring(L, "name");
+    lua_pushstring(L, entry.name);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "size");
+    lua_pushinteger(L, entry.size);
+    lua_settable(L, -3);
+
+    lua_pushstring(L, "dev");
+    lua_pushstring(L, entry.dev);
+    lua_settable(L, -3);
+
+    lua_rawseti(L, -2, idx++);
+  }
+  return 1;
+}
+
 void register_gui_api(lua_State *L) {
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
   lua_register(L, "drawGradient", l_draw_gradient);
+  lua_register(L, "drawLine", l_draw_line);
 
   lua_register(L, "animCreate", l_anim_create);
   lua_register(L, "animTo", l_anim_to);
   lua_register(L, "animStep", l_anim_step);
   lua_register(L, "animEval", l_anim_eval);
-  lua_register(L, "textInput", l_text_input);
+
   lua_register(L, "button", l_button);
   lua_register(L, "checkbox", l_checkbox);
   lua_register(L, "slider", l_slider);
+
   lua_register(L, "exec", l_exec);
   lua_register(L, "getUptime", l_get_uptime);
   lua_register(L, "getMemInfo", l_get_mem_info);
+  lua_register(L, "getMouse", l_get_mouse);
+  lua_register(L, "getLastKey", l_get_last_key);
+  lua_register(L, "scancodeToAscii", l_scancode_to_ascii);
+  lua_register(L, "readFile", l_read_file);
+  lua_register(L, "saveFile", l_save_file);
+  lua_register(L, "getFiles", l_get_files);
 }
