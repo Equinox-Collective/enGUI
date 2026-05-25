@@ -81,14 +81,17 @@ int main(int argc, char **argv) {
   }
 
   /*
-   * SYS_GET_TIME returns `tick * 10`. With the kernel's PIT initialised at
-   * 50 Hz (`init_timer(50)` in EquinoxOS' kernel.c), one PIT tick = 20 ms,
-   * so one returned unit equals 2 ms of wall-clock time — not 10 ms.
-   * Using TICK_MS = 10 made `dt` 5× too large, so the slide-in animation
-   * in init.lua played in ~60 ms instead of its declared 300 ms and looked
-   * snappy/janky rather than smooth.
+   * SYS_GET_TIME now returns milliseconds-since-boot directly: the kernel
+   * runs PIT at 1 kHz (`init_timer(1000)` in EquinoxOS' kernel.c) and
+   * exposes `tick` as the raw ms counter via the syscall (see kernel.c /
+   * syscall.c, case 6). So one returned unit == 1 ms of wall-clock time.
+   *
+   * Historical note: when PIT ran at 50 Hz and the syscall returned
+   * `tick * 10`, TICK_MS used to be 2. Both have since changed in
+   * lock-step; keeping TICK_MS at the old value made every `dt` 2× too
+   * large and animations played at 2× speed.
    */
-  const uint32_t TICK_MS = 2;
+  const uint32_t TICK_MS = 1;
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
   uint8_t last_key = 0;
