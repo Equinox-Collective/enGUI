@@ -135,6 +135,30 @@ static int l_slider(lua_State *L) {
   return 1;
 }
 
+static int l_text_input(lua_State *L) {
+  const char *label = luaL_checkstring(L, 1);
+  int x = luaL_checkinteger(L, 2);
+  int y = luaL_checkinteger(L, 3);
+  int w = luaL_checkinteger(L, 4);
+  int h = luaL_checkinteger(L, 5);
+  const char *curr_val = luaL_checkstring(L, 6);
+  int max_len = luaL_checkinteger(L, 7);
+
+  char buf[256];
+  strncpy(buf, curr_val, sizeof(buf));
+  buf[sizeof(buf) - 1] = '\0';
+
+  // Вызываем виджет
+  uint32_t state =
+      eid_text_input(&eid_ctx, label, x, y, w, h, buf,
+                     (max_len < sizeof(buf)) ? max_len : sizeof(buf));
+
+  // Возвращаем измененную строку и флаг фокуса
+  lua_pushstring(L, buf);
+  lua_pushboolean(L, (state & EID_STATE_FOCUSED) != 0);
+  return 2;
+}
+
 void register_gui_api(lua_State *L) {
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
@@ -148,4 +172,13 @@ void register_gui_api(lua_State *L) {
   lua_register(L, "button", l_button);
   lua_register(L, "checkbox", l_checkbox);
   lua_register(L, "slider", l_slider);
+}
+
+bool is_any_anim_active(void) {
+  for (int i = 0; i < anim_count; i++) {
+    if (anims[i].active) {
+      return true;
+    }
+  }
+  return false;
 }
