@@ -5,8 +5,14 @@ local windows = {}
 local focused_window = nil
 local last_mdown = false
 
+-- Флаг грязного кадра: Lua выставляет в true, если нужна перерисовка
+-- (matrix mode, мигающий курсор). C читает через getLastKey() side-effect.
+_G.needs_redraw = false
+
 -- Состояние глобального ввода для Блокнота / Терминала
 local shift_pressed = false
+-- Кэш последнего значения blink для отслеживания переходов
+local last_blink_state = -1
 
 -- --- КЛАСС WINDOW (ООП МЕНЕДЖЕР ОКОН) ---
 local Window = {}
@@ -106,6 +112,7 @@ local function draw_terminal(win, mx, my, mdown, dt)
     -- Обработка Matrix-режима
     if matrix_mode then
         matrix_tick = matrix_tick + 1
+        _G.needs_redraw = true  -- требуем перерисовку каждый кадр
         drawRect(win.x, win.y, win.w, win.h, 0x000000)
         for i = 1, 30 do
             local rx = win.x + ((i * 17) % win.w)
@@ -137,8 +144,13 @@ local function draw_terminal(win, mx, my, mdown, dt)
     drawRect(win.x, prompt_y, win.w, 1, 0x2E3440)
     drawText(">> " .. term_input, win.x + 8, prompt_y + 4, 0xF8F8F2)
 
-    -- Мигающий курсор терминала
-    if math.floor(getUptime() * 2) % 2 == 0 then
+    -- Мигающий курсор терминала (только отмечаем dirty при смене фазы)
+    local blink = math.floor(getUptime() * 2) % 2
+    if blink ~= last_blink_state then
+        _G.needs_redraw = true
+        last_blink_state = blink
+    end
+    if blink == 0 then
         local cur_cx = win.x + 8 + 24 + string.len(term_input) * 8
         drawRect(cur_cx, prompt_y + 16, 8, 2, 0x8BE9FD)
     end
@@ -325,8 +337,13 @@ local function draw_notepad(win, mx, my, mdown, dt)
         drawText(line, win.x + 8, text_y + (idx - 1) * 14, 0xE5E9F0)
     end
 
-    -- Курсор ввода текста на последней строке
-    if math.floor(getUptime() * 2) % 2 == 0 then
+    -- Курсор ввода текста на последней строке (dirty только при смене фазы)
+    local np_blink = math.floor(getUptime() * 2) % 2
+    if np_blink ~= last_blink_state then
+        _G.needs_redraw = true
+        last_blink_state = np_blink
+    end
+    if np_blink == 0 then
         local last_line = lines[#lines] or ""
         local cur_x = win.x + 8 + string.len(last_line) * 8
         local cur_y = text_y + (#lines - 1) * 14
@@ -417,6 +434,7 @@ local drag_ox, drag_oy = 0, 0
 
 function on_tick(dt)
     local mx, my, mdown = getMouse()
+    _G.needs_redraw = false  -- сбрасываем в начале каждого тика
 
     -- 1. Рендеринг обоев (Красивый плавный космический фон)
     drawGradient(0, 0, 1024, 728, 0x101216, 0x1E222D, true)

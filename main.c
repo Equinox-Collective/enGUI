@@ -17,6 +17,35 @@ uint32_t *draw_target = NULL; // Наша цель для всех функци�
 uint32_t screen_w = 1024;
 uint32_t screen_h = 768;
 
+static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
+  size_t blocks = bytes / 64;
+  uint8_t *d = (uint8_t *)dest;
+  const uint8_t *s = (const uint8_t *)src;
+
+  for (size_t i = 0; i < blocks; i++) {
+    __asm__ volatile("movups 0(%0), %%xmm0\n"
+                     "movups 16(%0), %%xmm1\n"
+                     "movups 32(%0), %%xmm2\n"
+                     "movups 48(%0), %%xmm3\n"
+                     "movntdq %%xmm0, 0(%1)\n"
+                     "movntdq %%xmm1, 16(%1)\n"
+                     "movntdq %%xmm2, 32(%1)\n"
+                     "movntdq %%xmm3, 48(%1)\n"
+                     :
+                     : "r"(s), "r"(d)
+                     : "xmm0", "xmm1", "xmm2", "xmm3", "memory");
+    s += 64;
+    d += 64;
+  }
+
+  size_t remaining = bytes % 64;
+  for (size_t i = 0; i < remaining; i++) {
+    d[i] = s[i];
+  }
+
+  __asm__ volatile("sfence" ::: "memory");
+}
+
 eid_ctx_t eid_ctx;
 
 extern bool is_any_anim_active(void);
@@ -92,12 +121,14 @@ int main(int argc, char **argv) {
    * large and animations played at 2× speed.
    */
   const uint32_t TICK_MS = 1;
+  const uint32_t TARGET_FRAME_MS = 16; /* ~60 FPS cap */
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
   uint8_t last_key = 0;
   uint32_t force_frames = 4;
 
   uint32_t last_tick = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+  uint32_t frame_start = last_tick;
 
   while (1) {
     uint64_t mx = 0, my = 0, m_btn = 0;
@@ -142,11 +173,18 @@ int main(int argc, char **argv) {
 
       eid_end(&eid_ctx, 0, 0);
 
+      /* Читаем _G.needs_redraw из Lua — если Lua хочет ещё кадр
+       * (matrix-анимация, переход cursor blink), форсируем следующую итерацию */
+      lua_getglobal(L, "needs_redraw");
+      if (lua_toboolean(L, -1) && force_frames == 0)
+        force_frames = 1;
+      lua_pop(L, 1);
+
       // Накладываем курсор поверх бэкбуфера прямо перед отправкой кадра
       draw_cursor_user(backbuffer, cur_mx, cur_my, screen_w, screen_h);
 
       // Копируем готовый бэкбуфер во фронтбуфер
-      memcpy(vram, backbuffer, screen_w * screen_h * 4);
+      fast_memcpy_sse(vram, backbuffer, screen_w * screen_h * 4);
 
       last_mx = cur_mx;
       last_my = cur_my;
@@ -154,23 +192,27 @@ int main(int argc, char **argv) {
       last_key = cur_key;
       if (force_frames > 0)
         force_frames--;
+
+      /* Обновляем last_tick только когда рисовали, чтобы dt был корректен */
+      last_tick = now;
     }
 
-    last_tick = now;
-
     /*
-     * `sys_sleep(16)` actually sleeps ≥ 40 ms — SYS_SLEEP waits until
-     * `(tick*10) >= start + ms`, which at 50 Hz resolves to a 2-tick
-     * minimum. That capped the loop at ~25 FPS even when the backbuffer
-     * blit was the only real work.
+     * Frame-rate limiter: спим оставшуюся часть 16ms кванта вместо
+     * busy-loop через sys_yield(). Без этого цикл крутится тысячи
+     * раз в секунду, выедая CPU и не давая ядру обработать ввод.
      *
-     * Use `sys_yield()` instead: when no redraw is needed (`need_redraw`
-     * false) we skip rendering anyway, so the loop is cheap; when an
-     * animation is active we want to go as fast as the PIT-driven
-     * preemptive scheduler will let us (one quantum per frame ≈ 50 FPS
-     * cap), not be artificially throttled.
+     * SYS_SLEEP ждёт до frame_start + TARGET_FRAME_MS; если кадр
+     * занял больше — сразу возвращается (без дополнительного штрафа).
      */
-    sys_yield();
+    uint32_t frame_end = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+    uint32_t frame_elapsed = frame_end - frame_start;
+    if (frame_elapsed < TARGET_FRAME_MS) {
+      sys_sleep(TARGET_FRAME_MS - frame_elapsed);
+    } else {
+      sys_yield(); /* кадр и так долгий — просто отдаём квант */
+    }
+    frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
   }
 
   lua_close(L);
