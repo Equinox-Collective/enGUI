@@ -212,9 +212,12 @@ static int l_read_file(lua_State *L) {
 
 static int l_save_file(lua_State *L) {
   const char *filename = luaL_checkstring(L, 1);
-  const char *data = luaL_checkstring(L, 2);
-  int len = (int)strlen(data);
-  write_file(filename, (void *)data, len);
+  size_t len = 0;
+  /* Lua strings are length-prefixed and may contain embedded NUL bytes
+   * (e.g. binary blobs from readFile). Using strlen() here truncated any
+   * payload at the first 0x00 — silently corrupting binary saves. */
+  const char *data = luaL_checklstring(L, 2, &len);
+  write_file(filename, (void *)data, (int)len);
   return 0;
 }
 
