@@ -5,11 +5,12 @@
 #include <eid.h>
 #include <eid_ext.h>
 #include <equos.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
+
 
 uint32_t *vram = NULL;
 uint32_t *backbuffer = NULL;
@@ -139,7 +140,7 @@ int main(int argc, char **argv) {
   uint32_t frame_start = last_tick;
 
   while (1) {
-    // Если запущено полно­экранное приложение (doom, snake, bmpview...),
+    // Если запущено полно­экранное приложение (doom, snake, bmpview...)
     // оно само владеет vram через SYS_DRAW_BUFFER. В этом случае нам
     // ни рисовать в backbuffer (логика интерфейса не видна), ни — что
     // важнее — копировать backbuffer во фронт (он сотрёт кадр игры).
@@ -159,7 +160,8 @@ int main(int argc, char **argv) {
       // полной перерисовки, чтобы курсор/анимации вернулись на свои
       // места без артефактов от чужих кадров.
       force_frames = 4;
-      last_mx = -9999; last_my = -9999;
+      last_mx = -9999;
+      last_my = -9999;
       continue;
     }
 
@@ -215,7 +217,8 @@ int main(int argc, char **argv) {
        */
 
       /* Читаем _G.needs_redraw из Lua — если Lua хочет ещё кадр
-       * (matrix-анимация, переход cursor blink), форсируем следующую итерацию */
+       * (matrix-анимация, переход cursor blink), форсируем следующую итерацию
+       */
       lua_getglobal(L, "needs_redraw");
       if (lua_toboolean(L, -1) && force_frames == 0)
         force_frames = 1;
