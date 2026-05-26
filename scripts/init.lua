@@ -88,24 +88,69 @@ local term_input = ""
 local matrix_mode = false
 local matrix_tick = 0
 
-local function process_command(cmd)
-    cmd = string.gsub(cmd, "%s+", "") -- убираем лишние пробелы
-    if cmd == "help" then
-        table.insert(term_lines, "Commands: help, clear, matrix, doom, snake")
-    elseif cmd == "clear" then
-        term_lines = {}
-    elseif cmd == "matrix" then
+-- ANSI-эскейпы (\e[33m ... \e[0m), которые kernel-shell аккуратно
+-- расставляет для help/ps, мы тут просто отрезаем — у нашего терминала
+-- нет цветного рендера, иначе они вылезают мусором.
+local function strip_ansi(s)
+    if not s then return "" end
+    -- \027 = ESC. Паттерн ловит ESC[...m любой длины.
+    return (s:gsub("\27%[[%d;]*m", ""))
+end
+
+-- Добавляет многострочный текст в term_lines, разбивая по '\n'.
+local function term_append_multiline(text)
+    text = strip_ansi(text or "")
+    if text == "" then return end
+    for line in (text .. "\n"):gmatch("([^\n]*)\n") do
+        table.insert(term_lines, line)
+    end
+end
+
+-- Команды, которые ВСЕГДА обрабатываем сами (т.к. они GUI-specific и в
+-- kernel-shell их и не должно быть).
+local GUI_LOCAL_COMMANDS = {
+    clear   = function() term_lines = {} end,
+    matrix  = function()
         matrix_mode = not matrix_mode
-        table.insert(term_lines, "Matrix digital rain: " .. (matrix_mode and "ENABLED" or "DISABLED"))
-    elseif cmd == "doom" then
+        table.insert(term_lines,
+            "Matrix digital rain: " .. (matrix_mode and "ENABLED" or "DISABLED"))
+    end,
+    doom    = function()
         table.insert(term_lines, "Launching doom.elf...")
         exec("bin/doom.elf -iwad res/doom1.wad")
-    elseif cmd == "snake" then
+    end,
+    snake   = function()
         table.insert(term_lines, "Launching snake.elf...")
         exec("bin/snake.elf")
-    elseif cmd ~= "" then
-        table.insert(term_lines, "Unknown command: '" .. cmd .. "'")
+    end,
+}
+
+local function process_command(raw)
+    raw = raw or ""
+    local s = string.match(raw, "^%s*(.-)%s*$") or ""
+    if s == "" then return end
+
+    local verb = string.match(s, "^(%S+)")
+
+    -- 1) GUI-локальные команды (clear/matrix/doom/snake) — без syscall.
+    local local_handler = GUI_LOCAL_COMMANDS[verb]
+    if local_handler then
+        local_handler()
+        return
     end
+
+    -- 2) Всё остальное (help/ps/kill/killall/run/ls/fetch/reboot/...) —
+    --    отдаём ring-0 shell через SYS_SHELL_EXEC. Если binding по
+    --    какой-то причине отсутствует (старый kernel), оставляем
+    --    короткий понятный fallback.
+    if type(shellExec) ~= "function" then
+        table.insert(term_lines,
+            "shellExec() not available — rebuild sysgui against new kernel")
+        return
+    end
+
+    local out = shellExec(s)
+    term_append_multiline(out)
 end
 
 local function draw_terminal(win, mx, my, mdown, dt)
@@ -221,27 +266,46 @@ local function draw_paint(win, mx, my, mdown, dt)
         saveFile("PAINT.TXT", "Equinox Paint Canvas Dump")
     end
 
-    -- Обработка рисования (холст ниже панели инструментов)
+    -- Обработка рисования (холст ниже панели инструментов).
+    -- Важно: рисовать можно ТОЛЬКО если Paint в фокусе И клик СТАРТОВАЛ
+    -- внутри холста. Иначе перетаскивание любого другого окна поверх
+    -- Paint вызывает срабатывание этого хэндлера: mdown=true, mx/my
+    -- внутри Paint, и мы оставляли линии "под чужим окном". Теперь
+    -- штрих стартуем только на edge (mdown && !last_mdown) при фокусе
+    -- на Paint, продолжаем — пока мышь зажата и штрих активен.
     local canvas_y = win.y + 25
-    local inside_canvas = (mx >= win.x and mx < win.x + win.w and my >= canvas_y and my < win.y + win.h)
+    local inside_canvas = (mx >= win.x and mx < win.x + win.w
+                           and my >= canvas_y and my < win.y + win.h)
+    local is_focused = (focused_window == win)
 
-    if inside_canvas and mdown then
-        if not active_stroke then
-            active_stroke = { color = active_color, points = {} }
-            table.insert(paint_strokes, active_stroke)
-        end
+    if is_focused and inside_canvas and mdown and not last_mdown then
+        active_stroke = { color = active_color, points = {{ x = mx, y = my }} }
+        table.insert(paint_strokes, active_stroke)
+    elseif active_stroke and mdown then
         table.insert(active_stroke.points, { x = mx, y = my })
-    else
+    end
+    if not mdown then
         active_stroke = nil
     end
 
-    -- Рендеринг всех нарисованных мазков
+    -- Рендеринг всех нарисованных мазков (только внутри холста, иначе
+    -- линии "вытекали" за рамку окна при сдвиге Paint к краю экрана).
+    local canvas_x0 = win.x
+    local canvas_y0 = canvas_y
+    local canvas_x1 = win.x + win.w
+    local canvas_y1 = win.y + win.h
+    local function in_canvas(p)
+        return p.x >= canvas_x0 and p.x < canvas_x1
+           and p.y >= canvas_y0 and p.y < canvas_y1
+    end
     for _, stroke in ipairs(paint_strokes) do
         local points = stroke.points
         for k = 1, #points - 1 do
             local p1 = points[k]
             local p2 = points[k+1]
-            drawLine(p1.x, p1.y, p2.x, p2.y, stroke.color)
+            if in_canvas(p1) and in_canvas(p2) then
+                drawLine(p1.x, p1.y, p2.x, p2.y, stroke.color)
+            end
         end
     end
 end
@@ -267,8 +331,19 @@ local function draw_explorer(win, mx, my, mdown, dt)
         drawText("No volumes or files found.", win.x + 20, draw_y, 0x888C94)
     end
 
-    for idx, f in ipairs(files_list) do
-        local row_y = draw_y + (idx - 1) * 22
+    -- Сколько строк влезает в окно (не считая шапку 32px). Раньше
+    -- рисовали все элементы списка подряд → они вытекали ниже окна и
+    -- "висели" на рабочем столе. И длинные имена накладывались на
+    -- колонку EXT2_DISK, потому что текст не клипался.
+    local row_h = 22
+    local max_rows = math.max(0, math.floor((win.h - 32) / row_h))
+    local dev_col_x = win.x + win.w - 120
+    local name_col_x = win.x + 26
+    local max_name_chars = math.max(0, math.floor((dev_col_x - name_col_x - 4) / 8))
+
+    for idx = 1, math.min(#files_list, max_rows) do
+        local f = files_list[idx]
+        local row_y = draw_y + (idx - 1) * row_h
         local is_hover = (mx >= win.x and mx < win.x + win.w and my >= row_y and my < row_y + 20)
 
         -- Эффект выделения строки
@@ -280,9 +355,13 @@ local function draw_explorer(win, mx, my, mdown, dt)
         local icon_col = (f.dev == "EXT2_DISK") and 0x5E81AC or 0xEBCB8B
         drawRect(win.x + 8, row_y + 5, 10, 10, icon_col)
 
-        -- Название и размер
-        drawText(f.name, win.x + 26, row_y + 3, 0xE5E9F0)
-        drawText(f.dev, win.x + win.w - 120, row_y + 3, 0x888C94)
+        -- Название (обрезанное под колонку) и dev
+        local display_name = f.name or ""
+        if #display_name > max_name_chars and max_name_chars > 1 then
+            display_name = string.sub(display_name, 1, max_name_chars - 1) .. "~"
+        end
+        drawText(display_name, name_col_x, row_y + 3, 0xE5E9F0)
+        drawText(f.dev, dev_col_x, row_y + 3, 0x888C94)
 
         -- При клике открываем файл в Блокноте
         if is_hover and mdown and not last_mdown then
@@ -411,7 +490,7 @@ local desktop_icons = {
     { label = "Paint",    icon_col = 0xFF6B00, text = "P",  win_title = "Vector Paint Brush" },
     { label = "Explorer", icon_col = 0xF0C040, text = "E",  win_title = "VFS File Explorer" },
     { label = "Notepad",  icon_col = 0x2B579A, text = "N",  win_title = "Notepad Text Editor" },
-    { label = "Doom",     icon_col = 0x8B0000, text = "",   exec = "bin/doom.elf", pixels = doom_pixels },
+    { label = "Doom",     icon_col = 0x8B0000, text = "",   exec = "bin/doom.elf -iwad res/doom1.wad", pixels = doom_pixels },
 }
 
 -- Инициализируем объекты окон
@@ -438,7 +517,8 @@ function on_tick(dt)
     _G.needs_redraw = false  -- сбрасываем в начале каждого тика
 
     -- 1. Рендеринг обоев (Красивый плавный космический фон)
-    drawGradient(0, 0, sw, sh - 32, 0x101216, 0x1E222D, true)
+    local task_y = sh - 32
+    drawGradient(0, 0, sw, task_y, 0x101216, 0x1E222D, true)
 
     -- 2. Обработка ввода (Считывание сканкодов клавиш)
     local key = getLastKey()
@@ -594,8 +674,7 @@ function on_tick(dt)
     end
 
     -- 6. Нижняя системная панель задач (Taskbar)
-    local task_y = 736
-    drawGradient(0, task_y, sw, sh - 32, 0x1B1F2A, 0x12151D, true)
+    drawGradient(0, task_y, sw, 32, 0x1B1F2A, 0x12151D, true)
     drawRect(0, task_y, sw, 1, 0x2A2E3D)
 
     -- Быстрый список открытых окон в левой части

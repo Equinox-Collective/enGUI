@@ -121,7 +121,15 @@ int main(int argc, char **argv) {
    * large and animations played at 2× speed.
    */
   const uint32_t TICK_MS = 1;
-  const uint32_t TARGET_FRAME_MS = 16; /* ~60 FPS cap */
+  /*
+   * Frame cap = 16 ms (~60 FPS). Ранее пробовал 8 ms ради сглаживания
+   * под 200 Hz PS/2-мышь, но на медленных конфигурациях (TCG без KVM/WHPX
+   * + debug-флаги `-d int,...` в `make run`) это удваивает количество
+   * полных перерисовок в секунду без реального прироста FPS и только
+   * выедает CPU. 16 ms — разумный кэп, для сглаживания drag'а реальный
+   * фикс лежит в Makefile (`-accel whpx` и убрать `-d int`).
+   */
+  const uint32_t TARGET_FRAME_MS = 16;
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
   uint8_t last_key = 0;
@@ -131,6 +139,30 @@ int main(int argc, char **argv) {
   uint32_t frame_start = last_tick;
 
   while (1) {
+    // Если запущено полно­экранное приложение (doom, snake, bmpview...),
+    // оно само владеет vram через SYS_DRAW_BUFFER. В этом случае нам
+    // ни рисовать в backbuffer (логика интерфейса не видна), ни — что
+    // важнее — копировать backbuffer во фронт (он сотрёт кадр игры).
+    // Спим подольше и идём дальше.
+    uint64_t fg = _syscall(SYS_GET_FG_APP, 0, 0, 0, 0, 0);
+    // Защита от рассинхрона: старое ядро без case 74 в syscall-
+    // диспетчере вернёт сам номер syscall (RAX остаётся равным 74,
+    // т.к. default-ветка ничего не пишет в regs->rax). Если у юзера
+    // обновился sysgui, но не пересобралось ядро, без этой проверки
+    // sysgui решит, что есть foreground-app, и навсегда перестанет
+    // композитить — экран намертво застывает. Подстраховываемся.
+    if (fg == SYS_GET_FG_APP)
+      fg = 0;
+    if (fg != 0) {
+      sys_sleep(50);
+      // Когда foreground-app исчезнет, форсируем несколько кадров
+      // полной перерисовки, чтобы курсор/анимации вернулись на свои
+      // места без артефактов от чужих кадров.
+      force_frames = 4;
+      last_mx = -9999; last_my = -9999;
+      continue;
+    }
+
     uint64_t mx = 0, my = 0, m_btn = 0;
     __asm__ volatile("mov $7, %%rax\n int $0x80"
                      : "=a"(mx), "=b"(my), "=c"(m_btn));
@@ -171,7 +203,16 @@ int main(int argc, char **argv) {
         lua_pop(L, 1);
       }
 
-      eid_end(&eid_ctx, 0, 0);
+      /*
+       * НЕ зовём eid_end(&eid_ctx, 0, 0): он делает syscall SYS_DRAW_BUFFER,
+       * который копирует весь backbuffer (1024*768*4 = 3 MB) в kernel-side
+       * app_win->buffer через `memcpy` под stac()/clac(). Это полезно для
+       * обычных приложений (kernel-compositor рисует их окно), но sysgui
+       * сам пишет напрямую в vram через `fast_memcpy_sse` ниже — kernel
+       * compositor его не композитит. То есть SYS_DRAW_BUFFER на каждом
+       * кадре впустую копировал 3 MB в ядре, что заметно подъедало CPU
+       * и душило общий FPS. Убираем.
+       */
 
       /* Читаем _G.needs_redraw из Lua — если Lua хочет ещё кадр
        * (matrix-анимация, переход cursor blink), форсируем следующую итерацию */

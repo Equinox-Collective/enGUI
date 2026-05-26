@@ -265,6 +265,72 @@ static int l_get_screen_size(lua_State *L) {
   return 2; // Возвращаем два значения
 }
 
+// getTasks() -> { {pid=, state="RUNNING"|"STOPPED", cr3=, brk=}, ... }
+static int l_get_tasks(lua_State *L) {
+  lua_newtable(L);
+  int out_idx = 1;
+  sys_task_info_t info;
+  for (int i = 0; i < 256; i++) {
+    uint64_t ok = _syscall(SYS_TASK_INFO, (uint64_t)i, (uint64_t)&info, 0, 0, 0);
+    if (!ok) break;
+    lua_newtable(L);
+    lua_pushstring(L, "pid");
+    lua_pushinteger(L, (lua_Integer)info.pid);
+    lua_settable(L, -3);
+    lua_pushstring(L, "state");
+    lua_pushstring(L, info.running ? "RUNNING" : "STOPPED");
+    lua_settable(L, -3);
+    lua_pushstring(L, "cr3");
+    lua_pushinteger(L, (lua_Integer)info.cr3);
+    lua_settable(L, -3);
+    lua_pushstring(L, "brk");
+    lua_pushinteger(L, (lua_Integer)info.brk);
+    lua_settable(L, -3);
+    lua_rawseti(L, -2, out_idx++);
+  }
+  return 1;
+}
+
+// killTask(pid) -> bool
+static int l_kill_task(lua_State *L) {
+  lua_Integer pid = luaL_checkinteger(L, 1);
+  uint64_t ok = _syscall(SYS_TASK_KILL, (uint64_t)pid, 0, 0, 0, 0);
+  lua_pushboolean(L, ok ? 1 : 0);
+  return 1;
+}
+
+// killAllTasks() -> integer (kill count)
+static int l_kill_all_tasks(lua_State *L) {
+  uint64_t n = _syscall(SYS_TASK_KILLALL, 0, 0, 0, 0, 0);
+  lua_pushinteger(L, (lua_Integer)n);
+  return 1;
+}
+
+// shellExec(line) -> string
+//
+// Прокидываем команду в ring-0 шелл (src/system/shell/shell.c, см.
+// shellsyntx.h). Вывод собирается во временный sink и возвращается как
+// одна строка Lua. Это позволяет Lua-терминалу в init.lua не дублировать
+// у себя реестр команд: всё, что умеет kernel-shell (help/ps/kill/
+// killall/run/...), автоматически доступно отсюда.
+//
+// Длина результата ограничена 2 КБ (см. SYS_SHELL_EXEC). Если строка
+// длиннее — она усекается, NUL-терминация гарантирована.
+static int l_shell_exec(lua_State *L) {
+  const char *line = luaL_checkstring(L, 1);
+  static char outbuf[2048];
+  outbuf[0] = '\0';
+  uint64_t n = _syscall(SYS_SHELL_EXEC,
+                        (uint64_t)line,
+                        (uint64_t)outbuf,
+                        (uint64_t)sizeof(outbuf),
+                        0, 0);
+  if (n >= sizeof(outbuf)) n = sizeof(outbuf) - 1;
+  outbuf[n] = '\0';
+  lua_pushlstring(L, outbuf, (size_t)n);
+  return 1;
+}
+
 void register_gui_api(lua_State *L) {
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
@@ -290,4 +356,12 @@ void register_gui_api(lua_State *L) {
   lua_register(L, "saveFile", l_save_file);
   lua_register(L, "getFiles", l_get_files);
   lua_register(L, "getScreenSize", l_get_screen_size);
+
+  /* ps / kill / killall bridges for the Lua ring-3 terminal */
+  lua_register(L, "getTasks",      l_get_tasks);
+  lua_register(L, "killTask",      l_kill_task);
+  lua_register(L, "killAllTasks",  l_kill_all_tasks);
+
+  /* one-shot ring-0 shell bridge — Lua terminal delegates everything here */
+  lua_register(L, "shellExec",     l_shell_exec);
 }
