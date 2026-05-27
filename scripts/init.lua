@@ -14,7 +14,7 @@ local shift_pressed = false
 -- Кэш последнего значения blink для отслеживания переходов
 local last_blink_state = -1
 
--- --- КЛАСС WINDOW (ООП МЕНЕДЖЕР ОКОН) ---
+-- ---КЛАСС WINDOW (ООП МЕНЕДЖЕР ОКОН) ---
 local Window = {}
 Window.__index = Window
 
