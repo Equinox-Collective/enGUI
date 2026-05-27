@@ -331,6 +331,43 @@ static int l_shell_exec(lua_State *L) {
   return 1;
 }
 
+static int l_draw_blur(lua_State *L) {
+  int x = luaL_checkinteger(L, 1);
+  int y = luaL_checkinteger(L, 2);
+  int w = luaL_checkinteger(L, 3);
+  int h = luaL_checkinteger(L, 4);
+  float amount = (float)luaL_checknumber(L, 5); // 0.0 - 1.0 (затемнение)
+
+  for (int i = y; i < y + h; i++) {
+    for (int j = x; j < x + w; j++) {
+      if (i <= 0 || j <= 0 || (uint32_t)i >= screen_h - 1 ||
+          (uint32_t)j >= screen_w - 1)
+        continue;
+
+      uint32_t c1 = draw_target[i * screen_w + j];
+      uint32_t c2 = draw_target[(i + 1) * screen_w + j];
+      uint32_t c3 = draw_target[i * screen_w + (j + 1)];
+      uint32_t c4 = draw_target[(i - 1) * screen_w + j];
+
+      uint8_t r = (((c1 >> 16) & 0xFF) + ((c2 >> 16) & 0xFF) +
+                   ((c3 >> 16) & 0xFF) + ((c4 >> 16) & 0xFF)) /
+                  4;
+      uint8_t g = (((c1 >> 8) & 0xFF) + ((c2 >> 8) & 0xFF) +
+                   ((c3 >> 8) & 0xFF) + ((c4 >> 8) & 0xFF)) /
+                  4;
+      uint8_t b = ((c1 & 0xFF) + (c2 & 0xFF) + (c3 & 0xFF) + (c4 & 0xFF)) / 4;
+
+      // Применяем коэффициент затемнения
+      r = (uint8_t)(r * amount);
+      g = (uint8_t)(g * amount);
+      b = (uint8_t)(b * amount);
+
+      draw_target[i * screen_w + j] = (r << 16) | (g << 8) | b;
+    }
+  }
+  return 0;
+}
+
 void register_gui_api(lua_State *L) {
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
@@ -364,4 +401,5 @@ void register_gui_api(lua_State *L) {
 
   /* one-shot ring-0 shell bridge — Lua terminal delegates everything here */
   lua_register(L, "shellExec",     l_shell_exec);
+  lua_register(L, "drawBlur", l_draw_blur);
 }
