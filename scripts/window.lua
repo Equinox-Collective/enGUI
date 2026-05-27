@@ -2,7 +2,8 @@
 local Window = {}
 Window.__index = Window
 
-function Window.new(title, x, y, w, h, draw_cb)
+-- Добавили key_cb в аргументы для явной передачи, если нужно
+function Window.new(title, x, y, w, h, draw_cb, key_cb)
     local self = setmetatable({}, Window)
     self.title = title
     self.x = x
@@ -13,7 +14,15 @@ function Window.new(title, x, y, w, h, draw_cb)
     self.borderless = false   -- Без рамок и заголовка
     self.fullscreen = false   -- На весь экран
     self.is_app_container = false
-    self.draw_cb = draw_cb
+
+    -- УМНАЯ РАСПАКОВКА: проверяем, что нам пришло на вход
+    if type(draw_cb) == "table" then
+        self.draw_cb = draw_cb.draw          -- Достаем функцию рисования из модуля
+        self.key_cb = draw_cb.handle_key     -- Достаем обработчик клавиш из модуля
+    else
+        self.draw_cb = draw_cb
+        self.key_cb = key_cb
+    end
 
     -- Инициализируем аппаратную анимацию масштабирования при создании окна
     if type(animCreate) == "function" then
@@ -131,6 +140,12 @@ function Window:draw(mx, my, mdown, dt)
         if mdown and not last_mdown and mx >= rx and mx < rx+10 and my >= ry and my < ry+10 then
             resizing_win = self
         end
+    end
+end
+
+function Window:handle_key(key, char)
+    if self.active and self.key_cb then
+        self.key_cb(self, key, char)
     end
 end
 
