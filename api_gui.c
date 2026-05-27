@@ -5,15 +5,19 @@
 #include <eid.h>
 #include <eid_ext.h>
 #include <equos.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdbool.h>
+
 
 extern uint32_t *draw_target;
 extern uint32_t screen_w, screen_h;
 extern eid_ctx_t eid_ctx;
+
+// Объявляем функцию пометки грязных тайлов из main.c
+extern void sysgui_mark_dirty(int x, int y, int w, int h);
 
 #define MAX_ANIMS 32
 static eid_anim_t anims[MAX_ANIMS];
@@ -78,6 +82,11 @@ static int l_draw_text(lua_State *L) {
   uint32_t color = (uint32_t)luaL_checknumber(L, 4);
 
   eid_draw_text(draw_target, screen_w, screen_h, x, y, str, color);
+
+  // Помечаем область текста грязной (высота шрифта PSF1 - 16 пикселей)
+  int text_len = strlen(str);
+  sysgui_mark_dirty(x, y, text_len * 8, 16);
+
   return 0;
 }
 
@@ -89,6 +98,9 @@ static int l_draw_rect(lua_State *L) {
   uint32_t color = (uint32_t)luaL_checknumber(L, 5);
 
   eid_draw_rect(draw_target, screen_w, screen_h, x, y, w, h, color);
+
+  sysgui_mark_dirty(x, y, w, h);
+
   return 0;
 }
 
@@ -103,6 +115,9 @@ static int l_draw_gradient(lua_State *L) {
 
   eid_draw_gradient_rect(draw_target, screen_w, screen_h, x, y, w, h, c1, c2,
                          vertical);
+
+  sysgui_mark_dirty(x, y, w, h);
+
   return 0;
 }
 
@@ -114,6 +129,14 @@ static int l_draw_line(lua_State *L) {
   uint32_t color = (uint32_t)luaL_checknumber(L, 5);
 
   eid_draw_line(draw_target, screen_w, screen_h, x1, y1, x2, y2, color);
+
+  // Находим границы линии для пометки грязной области
+  int min_x = x1 < x2 ? x1 : x2;
+  int min_y = y1 < y2 ? y1 : y2;
+  int w = (x1 > x2 ? x1 : x2) - min_x + 1;
+  int h = (y1 > y2 ? y1 : y2) - min_y + 1;
+  sysgui_mark_dirty(min_x, min_y, w, h);
+
   return 0;
 }
 
@@ -125,6 +148,10 @@ static int l_button(lua_State *L) {
   int h = luaL_checkinteger(L, 5);
 
   uint32_t state = eid_button(&eid_ctx, label, x, y, w, h);
+
+  // Кнопка рисует тень и тело — пометим область с запасом
+  sysgui_mark_dirty(x - 2, y - 2, w + 4, h + 6);
+
   lua_pushboolean(L, (state & EID_STATE_CLICKED) != 0);
   return 1;
 }
@@ -136,6 +163,11 @@ static int l_checkbox(lua_State *L) {
   bool val = lua_toboolean(L, 4);
 
   eid_checkbox(&eid_ctx, label, x, y, &val);
+
+  // Чекбокс имеет фиксированный размер 18px + длину текста лейбла
+  int label_len = strlen(label);
+  sysgui_mark_dirty(x, y, 18 + 8 + label_len * 8, 20);
+
   lua_pushboolean(L, val);
   return 1;
 }
@@ -150,6 +182,10 @@ static int l_slider(lua_State *L) {
   float max = (float)luaL_checknumber(L, 7);
 
   eid_slider(&eid_ctx, label, x, y, w, &val, min, max);
+
+  // Слайдер имеет высоту ползунка ~22px
+  sysgui_mark_dirty(x, y - 4, w, 26);
+
   lua_pushnumber(L, val);
   return 1;
 }
@@ -184,7 +220,7 @@ static int l_get_mouse(lua_State *L) {
 
 static int l_get_last_key(lua_State *L) {
   lua_pushinteger(L, eid_ctx.last_key);
-  eid_ctx.last_key = 0; // Сбрасываем сканкод
+  eid_ctx.last_key = 0;
   return 1;
 }
 
@@ -213,9 +249,6 @@ static int l_read_file(lua_State *L) {
 static int l_save_file(lua_State *L) {
   const char *filename = luaL_checkstring(L, 1);
   size_t len = 0;
-  /* Lua strings are length-prefixed and may contain embedded NUL bytes
-   * (e.g. binary blobs from readFile). Using strlen() here truncated any
-   * payload at the first 0x00 — silently corrupting binary saves. */
   const char *data = luaL_checklstring(L, 2, &len);
   write_file(filename, (void *)data, (int)len);
   return 0;
@@ -225,7 +258,6 @@ static int l_get_files(lua_State *L) {
   lua_newtable(L);
   int idx = 1;
 
-  // Локальный буфер в пространстве пользователя
   struct {
     char name[128];
     uint32_t size;
@@ -233,11 +265,9 @@ static int l_get_files(lua_State *L) {
   } entry;
 
   for (int i = 0;; i++) {
-    // Делаем системный вызов SYS_READ_DIR
-    // Передаем индекс файла `i` и адрес буфера `entry`
     uint64_t ret = _syscall(SYS_READ_DIR, i, (uint64_t)&entry, 0, 0, 0);
     if (!ret) {
-      break; // Если ядро вернуло 0, значит, файлы закончились
+      break;
     }
 
     lua_newtable(L);
@@ -262,17 +292,18 @@ static int l_get_files(lua_State *L) {
 static int l_get_screen_size(lua_State *L) {
   lua_pushinteger(L, screen_w);
   lua_pushinteger(L, screen_h);
-  return 2; // Возвращаем два значения
+  return 2;
 }
 
-// getTasks() -> { {pid=, state="RUNNING"|"STOPPED", cr3=, brk=}, ... }
 static int l_get_tasks(lua_State *L) {
   lua_newtable(L);
   int out_idx = 1;
   sys_task_info_t info;
   for (int i = 0; i < 256; i++) {
-    uint64_t ok = _syscall(SYS_TASK_INFO, (uint64_t)i, (uint64_t)&info, 0, 0, 0);
-    if (!ok) break;
+    uint64_t ok =
+        _syscall(SYS_TASK_INFO, (uint64_t)i, (uint64_t)&info, 0, 0, 0);
+    if (!ok)
+      break;
     lua_newtable(L);
     lua_pushstring(L, "pid");
     lua_pushinteger(L, (lua_Integer)info.pid);
@@ -291,7 +322,6 @@ static int l_get_tasks(lua_State *L) {
   return 1;
 }
 
-// killTask(pid) -> bool
 static int l_kill_task(lua_State *L) {
   lua_Integer pid = luaL_checkinteger(L, 1);
   uint64_t ok = _syscall(SYS_TASK_KILL, (uint64_t)pid, 0, 0, 0, 0);
@@ -299,33 +329,20 @@ static int l_kill_task(lua_State *L) {
   return 1;
 }
 
-// killAllTasks() -> integer (kill count)
 static int l_kill_all_tasks(lua_State *L) {
   uint64_t n = _syscall(SYS_TASK_KILLALL, 0, 0, 0, 0, 0);
   lua_pushinteger(L, (lua_Integer)n);
   return 1;
 }
 
-// shellExec(line) -> string
-//
-// Прокидываем команду в ring-0 шелл (src/system/shell/shell.c, см.
-// shellsyntx.h). Вывод собирается во временный sink и возвращается как
-// одна строка Lua. Это позволяет Lua-терминалу в init.lua не дублировать
-// у себя реестр команд: всё, что умеет kernel-shell (help/ps/kill/
-// killall/run/...), автоматически доступно отсюда.
-//
-// Длина результата ограничена 2 КБ (см. SYS_SHELL_EXEC). Если строка
-// длиннее — она усекается, NUL-терминация гарантирована.
 static int l_shell_exec(lua_State *L) {
   const char *line = luaL_checkstring(L, 1);
   static char outbuf[2048];
   outbuf[0] = '\0';
-  uint64_t n = _syscall(SYS_SHELL_EXEC,
-                        (uint64_t)line,
-                        (uint64_t)outbuf,
-                        (uint64_t)sizeof(outbuf),
-                        0, 0);
-  if (n >= sizeof(outbuf)) n = sizeof(outbuf) - 1;
+  uint64_t n = _syscall(SYS_SHELL_EXEC, (uint64_t)line, (uint64_t)outbuf,
+                        (uint64_t)sizeof(outbuf), 0, 0);
+  if (n >= sizeof(outbuf))
+    n = sizeof(outbuf) - 1;
   outbuf[n] = '\0';
   lua_pushlstring(L, outbuf, (size_t)n);
   return 1;
@@ -336,7 +353,7 @@ static int l_draw_blur(lua_State *L) {
   int y = luaL_checkinteger(L, 2);
   int w = luaL_checkinteger(L, 3);
   int h = luaL_checkinteger(L, 4);
-  float amount = (float)luaL_checknumber(L, 5); // 0.0 - 1.0 (затемнение)
+  float amount = (float)luaL_checknumber(L, 5);
 
   for (int i = y; i < y + h; i++) {
     for (int j = x; j < x + w; j++) {
@@ -357,7 +374,6 @@ static int l_draw_blur(lua_State *L) {
                   4;
       uint8_t b = ((c1 & 0xFF) + (c2 & 0xFF) + (c3 & 0xFF) + (c4 & 0xFF)) / 4;
 
-      // Применяем коэффициент затемнения
       r = (uint8_t)(r * amount);
       g = (uint8_t)(g * amount);
       b = (uint8_t)(b * amount);
@@ -365,6 +381,9 @@ static int l_draw_blur(lua_State *L) {
       draw_target[i * screen_w + j] = (r << 16) | (g << 8) | b;
     }
   }
+
+  sysgui_mark_dirty(x, y, w, h);
+
   return 0;
 }
 
@@ -374,8 +393,6 @@ static int l_set_app_window_pos(lua_State *L) {
   int w = luaL_checkinteger(L, 3);
   int h = luaL_checkinteger(L, 4);
 
-  // Вместо прямого доступа к памяти ядра используем системный вызов
-  // SYS_SET_WINDOW_POS = 36
   _syscall(36, (uint64_t)x, (uint64_t)y, (uint64_t)w, (uint64_t)h, 0);
 
   return 0;
@@ -407,13 +424,11 @@ void register_gui_api(lua_State *L) {
   lua_register(L, "getFiles", l_get_files);
   lua_register(L, "getScreenSize", l_get_screen_size);
 
-  /* ps / kill / killall bridges for the Lua ring-3 terminal */
-  lua_register(L, "getTasks",      l_get_tasks);
-  lua_register(L, "killTask",      l_kill_task);
-  lua_register(L, "killAllTasks",  l_kill_all_tasks);
+  lua_register(L, "getTasks", l_get_tasks);
+  lua_register(L, "killTask", l_kill_task);
+  lua_register(L, "killAllTasks", l_kill_all_tasks);
 
-  /* one-shot ring-0 shell bridge — Lua terminal delegates everything here */
-  lua_register(L, "shellExec",     l_shell_exec);
+  lua_register(L, "shellExec", l_shell_exec);
   lua_register(L, "drawBlur", l_draw_blur);
   lua_register(L, "setAppWindowPos", l_set_app_window_pos);
 }
