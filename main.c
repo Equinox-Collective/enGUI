@@ -13,9 +13,68 @@
 
 uint32_t *vram = NULL;
 uint32_t *backbuffer = NULL;
-uint32_t *draw_target = NULL; // Наша цель для всех функций отрисовки в Lua API
+uint32_t *draw_target = NULL;
 uint32_t screen_w = 1024;
 uint32_t screen_h = 768;
+
+// --- СИСТЕМА ДИНАМИЧЕСКИХ ГРЯЗНЫХ ТАЙЛОВ ---
+#define TILE_SIZE 32
+static uint8_t *dirty_grid = NULL;
+static int grid_cols = 0;
+static int grid_rows = 0;
+
+void sysgui_init_dirty_grid(void) {
+  grid_cols = (screen_w + TILE_SIZE - 1) / TILE_SIZE;
+  grid_rows = (screen_h + TILE_SIZE - 1) / TILE_SIZE;
+  dirty_grid = (uint8_t *)malloc(grid_cols * grid_rows);
+  if (dirty_grid) {
+    memset(dirty_grid, 1,
+           grid_cols * grid_rows); // Первый кадр полностью грязный
+  }
+}
+
+// Пометка произвольной области экрана как требующей обновления
+void sysgui_mark_dirty(int x, int y, int w, int h) {
+  if (!dirty_grid)
+    return;
+  if (x < 0) {
+    w += x;
+    x = 0;
+  }
+  if (y < 0) {
+    h += y;
+    y = 0;
+  }
+  if (x + w > (int)screen_w)
+    w = (int)screen_w - x;
+  if (y + h > (int)screen_h)
+    h = (int)screen_h - y;
+  if (w <= 0 || h <= 0)
+    return;
+
+  int start_col = x / TILE_SIZE;
+  int end_col = (x + w - 1) / TILE_SIZE;
+  int start_row = y / TILE_SIZE;
+  int end_row = (y + h - 1) / TILE_SIZE;
+
+  for (int r = start_row; r <= end_row; r++) {
+    for (int c = start_col; c <= end_col; c++) {
+      dirty_grid[r * grid_cols + c] = 1;
+    }
+  }
+}
+
+void sysgui_mark_all_dirty(void) {
+  if (dirty_grid) {
+    memset(dirty_grid, 1, grid_cols * grid_rows);
+  }
+}
+
+void sysgui_clear_dirty_grid(void) {
+  if (dirty_grid) {
+    memset(dirty_grid, 0, grid_cols * grid_rows);
+  }
+}
 
 static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
   size_t blocks = bytes / 64;
@@ -46,11 +105,51 @@ static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
   __asm__ volatile("sfence" ::: "memory");
 }
 
+// Высокопроизводительное копирование только изменившихся участков
+void copy_dirty_to_vram(void) {
+  if (!dirty_grid)
+    return;
+
+  for (int r = 0; r < grid_rows; r++) {
+    int c = 0;
+    while (c < grid_cols) {
+      if (dirty_grid[r * grid_cols + c]) {
+        // Ищем непрерывную последовательность "грязных" тайлов в строке для
+        // пакетного копирования
+        int start_col = c;
+        while (c < grid_cols && dirty_grid[r * grid_cols + c]) {
+          c++;
+        }
+        int end_col = c;
+
+        int x = start_col * TILE_SIZE;
+        int width_pixels = (end_col - start_col) * TILE_SIZE;
+        if (x + width_pixels > (int)screen_w) {
+          width_pixels = (int)screen_w - x;
+        }
+        int bytes_to_copy = width_pixels * 4;
+
+        // Копируем строки внутри этого горизонтального среза
+        for (int line = 0; line < TILE_SIZE; line++) {
+          int pixel_y = r * TILE_SIZE + line;
+          if (pixel_y >= (int)screen_h)
+            break;
+
+          uint32_t *src = &backbuffer[pixel_y * screen_w + x];
+          uint32_t *dst = &vram[pixel_y * screen_w + x];
+          fast_memcpy_sse(dst, src, bytes_to_copy);
+        }
+      } else {
+        c++;
+      }
+    }
+  }
+}
+
 eid_ctx_t eid_ctx;
 
 extern bool is_any_anim_active(void);
 
-// Отрисовка курсора в пользовательском пространстве поверх бэкбуфера
 void draw_cursor_user(uint32_t *fb, int x, int y, int w, int h) {
   static const int cursor_map[8][8] = {
       {2, 0, 0, 0, 0, 0, 0, 0}, {2, 2, 0, 0, 0, 0, 0, 0},
@@ -77,7 +176,6 @@ int main(int argc, char **argv) {
   uint64_t height = 0;
   uint64_t pitch = 0;
 
-  // Опрос физического фреймбуфера
   __asm__ volatile("mov $32, %%rax\n"
                    "int $0x80\n"
                    : "=a"(phys_fb), "=b"(width), "=c"(height), "=d"(pitch));
@@ -85,16 +183,16 @@ int main(int argc, char **argv) {
   screen_w = (uint32_t)width;
   screen_h = (uint32_t)height;
 
-  // Мапим физическую видеопамять (фронтбуфер)
   vram = (uint32_t *)_syscall(SYS_MAP_PHYS, phys_fb, screen_w * screen_h * 4, 0,
                               0, 0);
 
-  // Выделяем локальный бэкбуфер для двойной буферизации
   backbuffer = (uint32_t *)malloc(screen_w * screen_h * 4);
   memset(backbuffer, 0, screen_w * screen_h * 4);
 
-  // Присваиваем бэкбуфер как цель для Lua-отрисовки
   draw_target = backbuffer;
+
+  // Инициализация сетки грязных тайлов
+  sysgui_init_dirty_grid();
 
   eid_init();
   memset(&eid_ctx, 0, sizeof(eid_ctx));
@@ -109,26 +207,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  /*
-   * SYS_GET_TIME now returns milliseconds-since-boot directly: the kernel
-   * runs PIT at 1 kHz (`init_timer(1000)` in EquinoxOS' kernel.c) and
-   * exposes `tick` as the raw ms counter via the syscall (see kernel.c /
-   * syscall.c, case 6). So one returned unit == 1 ms of wall-clock time.
-   *
-   * Historical note: when PIT ran at 50 Hz and the syscall returned
-   * `tick * 10`, TICK_MS used to be 2. Both have since changed in
-   * lock-step; keeping TICK_MS at the old value made every `dt` 2× too
-   * large and animations played at 2× speed.
-   */
   const uint32_t TICK_MS = 1;
-  /*
-   * Frame cap = 16 ms (~60 FPS). Ранее пробовал 8 ms ради сглаживания
-   * под 200 Hz PS/2-мышь, но на медленных конфигурациях (TCG без KVM/WHPX
-   * + debug-флаги `-d int,...` в `make run`) это удваивает количество
-   * полных перерисовок в секунду без реального прироста FPS и только
-   * выедает CPU. 16 ms — разумный кэп, для сглаживания drag'а реальный
-   * фикс лежит в Makefile (`-accel whpx` и убрать `-d int`).
-   */
   const uint32_t TARGET_FRAME_MS = 16;
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
@@ -139,30 +218,9 @@ int main(int argc, char **argv) {
   uint32_t frame_start = last_tick;
 
   while (1) {
-    // Если запущено полно­экранное приложение (doom, snake, bmpview...)
-    // оно само владеет vram через SYS_DRAW_BUFFER. В этом случае нам
-    // ни рисовать в backbuffer (логика интерфейса не видна), ни — что
-    // важнее — копировать backbuffer во фронт (он сотрёт кадр игры).
-    // Спим подольше и идём дальше.
     uint64_t fg = _syscall(SYS_GET_FG_APP, 0, 0, 0, 0, 0);
-    // Защита от рассинхрона: старое ядро без case 74 в syscall-
-    // диспетчере вернёт сам номер syscall (RAX остаётся равным 74,
-    // т.к. default-ветка ничего не пишет в regs->rax). Если у юзера
-    // обновился sysgui, но не пересобралось ядро, без этой проверки
-    // sysgui решит, что есть foreground-app, и навсегда перестанет
-    // композитить — экран намертво застывает. Подстраховываемся.
     if (fg == SYS_GET_FG_APP)
       fg = 0;
-    // if (fg != 0) {
-    //   sys_sleep(50);
-    //   // Когда foreground-app исчезнет, форсируем несколько кадров
-    //   // полной перерисовки, чтобы курсор/анимации вернулись на свои
-    //   // места без артефактов от чужих кадров.
-    //   force_frames = 4;
-    //   last_mx = -9999;
-    //   last_my = -9999;
-    //   continue;
-    // }
 
     uint64_t mx = 0, my = 0, m_btn = 0;
     __asm__ volatile("mov $7, %%rax\n int $0x80"
@@ -173,12 +231,14 @@ int main(int argc, char **argv) {
 
     uint8_t cur_key = (uint8_t)_syscall(SYS_GET_SCANCODE, 0, 0, 0, 0, 0);
 
+    // 1. Сначала считываем текущее время ядра
+    uint32_t now = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+
+    // 2. Теперь рассчитываем необходимость кадра (переменная now уже объявлена)
     int need_redraw = (force_frames > 0) || (cur_mx != last_mx) ||
                       (cur_my != last_my) || (cur_mdown != last_mdown) ||
                       (cur_key != 0 && cur_key != last_key) ||
-                      is_any_anim_active();
-
-    uint32_t now = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+                      is_any_anim_active() || (now - last_tick >= 500);
 
     if (need_redraw) {
       uint32_t elapsed = now - last_tick;
@@ -186,7 +246,14 @@ int main(int argc, char **argv) {
       if (dt > 200.0f)
         dt = 200.0f;
 
-      // Отрисовываем всё в бэкбуфер
+      // Сбрасываем флаги изменений перед тиком Lua
+      sysgui_clear_dirty_grid();
+
+      // Если есть форсированные кадры (например, старт системы), обновляем всё
+      if (force_frames > 0) {
+        sysgui_mark_all_dirty();
+      }
+
       eid_begin(&eid_ctx, backbuffer, screen_w, screen_h);
       eid_ctx.mx = cur_mx;
       eid_ctx.my = cur_my;
@@ -204,30 +271,21 @@ int main(int argc, char **argv) {
         lua_pop(L, 1);
       }
 
-      /*
-       * НЕ зовём eid_end(&eid_ctx, 0, 0): он делает syscall SYS_DRAW_BUFFER,
-       * который копирует весь backbuffer (1024*768*4 = 3 MB) в kernel-side
-       * app_win->buffer через `memcpy` под stac()/clac(). Это полезно для
-       * обычных приложений (kernel-compositor рисует их окно), но sysgui
-       * сам пишет напрямую в vram через `fast_memcpy_sse` ниже — kernel
-       * compositor его не композитит. То есть SYS_DRAW_BUFFER на каждом
-       * кадре впустую копировал 3 MB в ядре, что заметно подъедало CPU
-       * и душило общий FPS. Убираем.
-       */
-
-      /* Читаем _G.needs_redraw из Lua — если Lua хочет ещё кадр
-       * (matrix-анимация, переход cursor blink), форсируем следующую итерацию
-       */
       lua_getglobal(L, "needs_redraw");
       if (lua_toboolean(L, -1) && force_frames == 0)
         force_frames = 1;
       lua_pop(L, 1);
 
+      // Помечаем грязными области под старой и новой позицией мыши, чтобы
+      // избежать шлейфов
+      sysgui_mark_dirty(last_mx, last_my, 8, 8);
+      sysgui_mark_dirty(cur_mx, cur_my, 8, 8);
+
       // Накладываем курсор поверх бэкбуфера прямо перед отправкой кадра
       draw_cursor_user(backbuffer, cur_mx, cur_my, screen_w, screen_h);
 
-      // Копируем готовый бэкбуфер во фронтбуфер
-      fast_memcpy_sse(vram, backbuffer, screen_w * screen_h * 4);
+      // Копируем во vram ТОЛЬКО измененные тайлы
+      copy_dirty_to_vram();
 
       last_mx = cur_mx;
       last_my = cur_my;
@@ -236,29 +294,22 @@ int main(int argc, char **argv) {
       if (force_frames > 0)
         force_frames--;
 
-      /* Обновляем last_tick только когда рисовали, чтобы dt был корректен */
       last_tick = now;
     }
 
-    /*
-     * Frame-rate limiter: спим оставшуюся часть 16ms кванта вместо
-     * busy-loop через sys_yield(). Без этого цикл крутится тысячи
-     * раз в секунду, выедая CPU и не давая ядру обработать ввод.
-     *
-     * SYS_SLEEP ждёт до frame_start + TARGET_FRAME_MS; если кадр
-     * занял больше — сразу возвращается (без дополнительного штрафа).
-     */
     uint32_t frame_end = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
     uint32_t frame_elapsed = frame_end - frame_start;
     if (frame_elapsed < TARGET_FRAME_MS) {
       sys_sleep(TARGET_FRAME_MS - frame_elapsed);
     } else {
-      sys_yield(); /* кадр и так долгий — просто отдаём квант */
+      sys_yield();
     }
     frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
   }
 
   lua_close(L);
   free(backbuffer);
+  if (dirty_grid)
+    free(dirty_grid);
   return 0;
 }
