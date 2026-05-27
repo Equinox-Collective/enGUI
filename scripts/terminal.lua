@@ -2,23 +2,23 @@
 local M = {}
 
 local term_lines = {
-    "Equinox OS Ring 3 Terminal [Version 2.1]",
+    "Equinox OS Ring 3 Terminal [Version 2.0]",
     "Welcome to the modular CLI shell.",
-    "Press keys to see their raw scancodes in the prompt below!",
+    "PageUp/PageDown - scroll back | Arrows Up/Down - history | Tab - autocomplete",
     ""
 }
 
 _G.term_lines = term_lines
 _G.term_input = ""
-_G.last_key_debug = 0 -- Глобальная переменная отладчика кодов клавиш
 
 local matrix_mode = false
 local matrix_tick = 0
 local last_blink_state = -1
 
+-- Локальная история команд терминала
 local cmd_history = {}
 local history_idx = 0
-local scroll_offset = 0
+local scroll_offset = 0 -- Смещение прокрутки назад
 
 local function strip_ansi(s)
     if not s then return "" end
@@ -95,6 +95,7 @@ M.draw = function(win, mx, my, mdown, dt)
     local line_h = 14
     local max_lines = math.floor((win.h - 30) / line_h)
     
+    -- Рассчитываем индексы вывода с учетом скроллбека
     local total_lines = #term_lines
     local end_idx = total_lines - scroll_offset
     local start_idx = end_idx - max_lines + 1
@@ -112,17 +113,10 @@ M.draw = function(win, mx, my, mdown, dt)
     local prompt_y = win.y + win.h - 22
     drawRect(win.x, prompt_y, win.w, 1, 0x2E3440)
     
-    -- Динамически формируем префикс с отладочной информацией
     local input_prefix = ">> "
     if scroll_offset > 0 then
-        input_prefix = string.format("[%d] >> ", scroll_offset)
+        input_prefix = string.format("[%d] >> ", scroll_offset) -- Показываем индикатор скролла
     end
-    
-    -- Добавляем отображение кода последней нажатой клавиши (Сниффер)
-    if _G.last_key_debug and _G.last_key_debug > 0 then
-        input_prefix = string.format("Code:%d %s", _G.last_key_debug, input_prefix)
-    end
-    
     drawText(input_prefix .. _G.term_input, win.x + 8, prompt_y + 4, 0xF8F8F2)
 
     -- Курсор
@@ -139,9 +133,6 @@ end
 
 -- Обработка клавиш приложения
 M.handle_key = function(win, key, char)
-    -- Сохраняем код нажатой клавиши для вывода на экран
-    _G.last_key_debug = key
-
     if key == 28 then -- ENTER
         if _G.term_input ~= "" then
             table.insert(cmd_history, _G.term_input)
@@ -150,25 +141,20 @@ M.handle_key = function(win, key, char)
         table.insert(term_lines, ">> " .. _G.term_input)
         process_command(_G.term_input)
         _G.term_input = ""
-        scroll_offset = 0
+        scroll_offset = 0 -- Сбрасываем скролл при вводе новой команды
         
     elseif key == 14 then -- BACKSPACE
         _G.term_input = string.sub(_G.term_input, 1, -2)
         
-    elseif key == 15 then -- TAB (100% Безопасный автокомплит)
+    elseif key == 15 then -- TAB (Автокомплит файлов VFS)
         local word = string.match(_G.term_input, "(%S+)$") or ""
         if word ~= "" then
             local files = getFiles()
-            if type(files) == "table" then
-                for _, f in ipairs(files) do
-                    -- Проверяем, что файл и его имя корректны
-                    if f and type(f.name) == "string" and f.name ~= "" then
-                        if string.sub(f.name, 1, string.len(word)) == word then
-                            local suffix = string.sub(f.name, string.len(word) + 1)
-                            _G.term_input = _G.term_input .. suffix
-                            break
-                        end
-                    end
+            for _, f in ipairs(files) do
+                if string.sub(f.name, 1, string.len(word)) == word then
+                    local suffix = string.sub(f.name, string.len(word) + 1)
+                    _G.term_input = _G.term_input .. suffix
+                    break
                 end
             end
         end
