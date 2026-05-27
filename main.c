@@ -11,7 +11,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-
 uint32_t *vram = NULL;
 uint32_t *backbuffer = NULL;
 uint32_t *draw_target = NULL; // Наша цель для всех функций отрисовки в Lua API

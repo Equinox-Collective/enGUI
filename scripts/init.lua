@@ -38,33 +38,37 @@ function Window:draw(mx, my, mdown, dt)
 
     -- 1. Рамка и тень (обводка)
     drawRect(self.x - 1, ty - 1, self.w + 2, self.h + 27, 0x111216)
+    drawRect(self.x + 2, ty + 2, self.w, self.h + 25, 0x000000)
 
     -- 2. Градиентный заголовок
     if active then
+        -- Яркий синий градиент (Win10 Style)
         drawGradient(self.x, ty, self.w, 25, 0x0078D7, 0x005A9E, true)
     else
-        drawGradient(self.x, ty, self.w, 25, 0x44464F, 0x2E3037, true)
+        -- Серый неактивный градиент
+        drawGradient(self.x, ty, self.w, 25, 0x3A3C44, 0x2E3037, true)
     end
 
     -- 3. Текст заголовка
+    drawText(self.title, self.x + 9, ty + 6, 0x222222) -- Тень
     drawText(self.title, self.x + 8, ty + 5, 0xFFFFFF)
 
     -- 4. Кнопка закрытия [X] (Стиль Windows 10)
-    local bx = self.x + self.w - 24
-    local by = ty + 4
-    local bw, bh = 18, 16
+    local bx = self.x + self.w - 28
+    local by = ty + 3
+    local bw, bh = 24, 18
     local over_close = (mx >= bx and mx < bx + bw and my >= by and my < by + bh)
     
     if over_close then
-        drawRect(bx, by, bw, bh, 0xE81123)
+        drawRect(bx, by, bw, bh, 0xE81123) -- Ярко-красный при наведении
     else
-        drawRect(bx, by, bw, bh, 0xCC2A2A)
+        drawRect(bx, by, bw, bh, active and 0xCC2A2A or 0x555555)
     end
-    drawText("X", bx + 5, by + 1, 0xFFFFFF)
+    drawText("X", bx + 8, by + 3, 0xFFFFFF)
 
     if over_close and mdown and not last_mdown then
         self.active = false
-        if focused_window == self then focused_window = nil end
+        -- Если нужно убить процесс, вызываем killTask(self.pid)
         return
     end
 
