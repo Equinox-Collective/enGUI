@@ -265,7 +265,7 @@ int main(int argc, char **argv) {
         lua_pushnumber(L, dt);
         if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
           printf("Lua Tick Error: %s\n", lua_tostring(L, -1));
-          lua_pop(L, 1);
+          break;
         }
       } else {
         lua_pop(L, 1);
