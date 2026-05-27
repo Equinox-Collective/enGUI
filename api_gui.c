@@ -368,6 +368,19 @@ static int l_draw_blur(lua_State *L) {
   return 0;
 }
 
+static int l_set_app_window_pos(lua_State *L) {
+  int x = luaL_checkinteger(L, 1);
+  int y = luaL_checkinteger(L, 2);
+  int w = luaL_checkinteger(L, 3);
+  int h = luaL_checkinteger(L, 4);
+
+  // Вместо прямого доступа к памяти ядра используем системный вызов
+  // SYS_SET_WINDOW_POS = 36
+  _syscall(36, (uint64_t)x, (uint64_t)y, (uint64_t)w, (uint64_t)h, 0);
+
+  return 0;
+}
+
 void register_gui_api(lua_State *L) {
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
@@ -402,4 +415,5 @@ void register_gui_api(lua_State *L) {
   /* one-shot ring-0 shell bridge — Lua terminal delegates everything here */
   lua_register(L, "shellExec",     l_shell_exec);
   lua_register(L, "drawBlur", l_draw_blur);
+  lua_register(L, "setAppWindowPos", l_set_app_window_pos);
 }
