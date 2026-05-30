@@ -1,4 +1,3 @@
--- res/sysgui/monitor.lua
 local M = {}
 
 -- Таблица для хранения истории использования ОЗУ (последние 45 замеров)
@@ -10,7 +9,7 @@ M.draw = function(win, mx, my, mdown, dt)
     local used, total = getMemInfo()
     local used_mb = math.floor(used / (1024 * 1024))
     local total_mb = math.floor(total / (1024 * 1024))
-    local ratio = used / total
+    local ratio = total > 0 and (used / total) or 0
 
     -- 1. Снимаем показания раз в 250 мс для формирования графика
     local now = getUptime()
