@@ -222,6 +222,14 @@ int main(int argc, char **argv) {
     if (fg == SYS_GET_FG_APP)
       fg = 0;
 
+    // --- БАЙПАС ДЛЯ ВНЕШНИХ ПРИЛОЖЕНИЙ (Браузер, Doom и т.д.) ---
+    // Если запущено приложение на переднем плане, sysgui засыпает
+    // и полностью освобождает видеопамять и буфер ввода.
+    if (fg != 0) {
+      sys_sleep(16);
+      continue;
+    }
+
     uint64_t mx = 0, my = 0, m_btn = 0;
     __asm__ volatile("mov $7, %%rax\n int $0x80"
                      : "=a"(mx), "=b"(my), "=c"(m_btn));
@@ -230,12 +238,6 @@ int main(int argc, char **argv) {
     int cur_mdown = (int)((m_btn & 1) != 0);
 
     // --- Чтение клавиатуры с поддержкой extended-сканкодов (0xE0) ---------
-    // Ядро кладёт в FIFO `0xE0`, а затем фактический код стрелки/PgUp/PgDn/
-    // Home/End/Insert/Delete отдельным байтом. Если читать по одному байту
-    // за кадр (как делал старый цикл), Lua получала сначала 0xE0, а потом,
-    // например, 0x48 (=Numpad-8) и не могла отличить стрелку Up от цифры.
-    // Здесь дренируем буфер до полного события и склеиваем расширенные
-    // коды в `0x100 | code`.
     static bool pending_ext = false;
     uint16_t cur_key = 0;
     for (int i = 0; i < 8; i++) {
@@ -252,13 +254,11 @@ int main(int argc, char **argv) {
       } else {
         cur_key = (uint16_t)b;
       }
-      break; // одно полное событие за кадр — остальное возьмём в следующем
+      break; 
     }
 
-    // 1. Сначала считываем текущее время ядра
     uint32_t now = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
-    // 2. Теперь рассчитываем необходимость кадра (переменная now уже объявлена)
     int need_redraw = (force_frames > 0) || (cur_mx != last_mx) ||
                       (cur_my != last_my) || (cur_mdown != last_mdown) ||
                       (cur_key != 0 && cur_key != last_key) ||
@@ -270,10 +270,8 @@ int main(int argc, char **argv) {
       if (dt > 200.0f)
         dt = 200.0f;
 
-      // Сбрасываем флаги изменений перед тиком Lua
       sysgui_clear_dirty_grid();
 
-      // Если есть форсированные кадры (например, старт системы), обновляем всё
       if (force_frames > 0) {
         sysgui_mark_all_dirty();
       }
@@ -300,15 +298,11 @@ int main(int argc, char **argv) {
         force_frames = 1;
       lua_pop(L, 1);
 
-      // Помечаем грязными области под старой и новой позицией мыши, чтобы
-      // избежать шлейфов
       sysgui_mark_dirty(last_mx, last_my, 8, 8);
       sysgui_mark_dirty(cur_mx, cur_my, 8, 8);
 
-      // Накладываем курсор поверх бэкбуфера прямо перед отправкой кадра
       draw_cursor_user(backbuffer, cur_mx, cur_my, screen_w, screen_h);
 
-      // Копируем во vram ТОЛЬКО измененные тайлы
       copy_dirty_to_vram();
 
       last_mx = cur_mx;
