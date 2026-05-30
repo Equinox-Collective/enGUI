@@ -1,10 +1,12 @@
 lua/lzio.o: lua/lzio.c lua/lprefix.h ../../sdk/include/string.h lua/lua.h \
- lua/luaconf.h lua/lapi.h lua/llimits.h lua/lstate.h lua/lobject.h \
- lua/ltm.h lua/lzio.h lua/lmem.h ../../sdk/include/signal.h
+ lua/luaconf.h ../../sdk/include/limits.h lua/lapi.h lua/llimits.h \
+ lua/lstate.h lua/lobject.h lua/ltm.h lua/lzio.h lua/lmem.h \
+ ../../sdk/include/signal.h
 lua/lprefix.h:
 ../../sdk/include/string.h:
 lua/lua.h:
 lua/luaconf.h:
+../../sdk/include/limits.h:
 lua/lapi.h:
 lua/llimits.h:
 lua/lstate.h:

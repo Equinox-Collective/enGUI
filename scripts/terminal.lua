@@ -132,8 +132,17 @@ M.draw = function(win, mx, my, mdown, dt)
 end
 
 -- Обработка клавиш приложения
+--
+-- Используем именованные KEY_* константы из api_gui.c (зарегистрированы
+-- через register_key_constants). Для extended-клавиш (стрелки, PgUp/PgDn)
+-- значение = 0x100 | scancode (например, KEY_UP = 0x148). Раньше тут были
+-- "магические" 72/80/73/81 — это были вторые байты PS/2 sequence без
+-- 0xE0-префикса, и работали они только случайно: дублирующий pop в
+-- `eid_begin()` (см. sdk/lib/eid.c) "съедал" второй байт, поэтому до Lua
+-- доходил только 0xE0, и стрелки не реагировали вовсе. После починки
+-- eid_begin и склейки в main.c сюда приходит уже полный extended-код.
 M.handle_key = function(win, key, char)
-    if key == 28 then -- ENTER
+    if key == KEY_ENTER then
         if _G.term_input ~= "" then
             table.insert(cmd_history, _G.term_input)
             history_idx = #cmd_history + 1
@@ -142,31 +151,40 @@ M.handle_key = function(win, key, char)
         process_command(_G.term_input)
         _G.term_input = ""
         scroll_offset = 0 -- Сбрасываем скролл при вводе новой команды
-        
-    elseif key == 14 then -- BACKSPACE
+
+    elseif key == KEY_BACKSPACE then
         _G.term_input = string.sub(_G.term_input, 1, -2)
-        
-    elseif key == 15 then -- TAB (Автокомплит файлов VFS)
+
+    elseif key == KEY_TAB then -- Автокомплит файлов VFS
         local word = string.match(_G.term_input, "(%S+)$") or ""
         if word ~= "" then
-            local files = getFiles()
-            for _, f in ipairs(files) do
-                if string.sub(f.name, 1, string.len(word)) == word then
-                    local suffix = string.sub(f.name, string.len(word) + 1)
-                    _G.term_input = _G.term_input .. suffix
-                    break
+            -- Защита от подвисания: getFiles() ходит через SYS_READ_DIR
+            -- по всем VFS-устройствам и в худшем случае выполняет
+            -- сотни disk-I/O. Оборачиваем в pcall, чтобы исключение не
+            -- роняло весь GUI, и ограничиваем число просматриваемых
+            -- записей разумным потолком.
+            local ok, files = pcall(getFiles)
+            if ok and type(files) == "table" then
+                local wlen = string.len(word)
+                local limit = math.min(#files, 256)
+                for i = 1, limit do
+                    local f = files[i]
+                    if f and f.name and string.sub(f.name, 1, wlen) == word then
+                        _G.term_input = _G.term_input .. string.sub(f.name, wlen + 1)
+                        break
+                    end
                 end
             end
         end
 
-    elseif key == 72 then -- СТРЕЛКА ВВЕРХ (Предыдущая команда из истории)
+    elseif key == KEY_UP then -- Предыдущая команда из истории
         if #cmd_history > 0 then
             history_idx = history_idx - 1
             if history_idx < 1 then history_idx = 1 end
             _G.term_input = cmd_history[history_idx] or ""
         end
 
-    elseif key == 80 then -- СТРЕЛКА ВНИЗ (Следующая команда из истории)
+    elseif key == KEY_DOWN then -- Следующая команда из истории
         if #cmd_history > 0 then
             history_idx = history_idx + 1
             if history_idx > #cmd_history then
@@ -177,7 +195,7 @@ M.handle_key = function(win, key, char)
             end
         end
 
-    elseif key == 73 then -- PAGE UP (Скролл вывода назад)
+    elseif key == KEY_PGUP then -- Скролл вывода назад
         scroll_offset = scroll_offset + 3
         local max_lines = math.floor((win.h - 30) / 14)
         if scroll_offset > #term_lines - max_lines then
@@ -185,9 +203,16 @@ M.handle_key = function(win, key, char)
         end
         if scroll_offset < 0 then scroll_offset = 0 end
 
-    elseif key == 81 then -- PAGE DOWN (Скролл вывода вперед)
+    elseif key == KEY_PGDN then -- Скролл вывода вперед
         scroll_offset = scroll_offset - 3
         if scroll_offset < 0 then scroll_offset = 0 end
+
+    elseif key == KEY_HOME then -- Прыжок в начало скроллбэка
+        local max_lines = math.floor((win.h - 30) / 14)
+        scroll_offset = math.max(0, #term_lines - max_lines)
+
+    elseif key == KEY_END then -- Прыжок в "живой" конец вывода
+        scroll_offset = 0
 
     elseif string.len(char) > 0 and string.byte(char) >= 32 then
         _G.term_input = _G.term_input .. char

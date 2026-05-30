@@ -211,7 +211,7 @@ int main(int argc, char **argv) {
   const uint32_t TARGET_FRAME_MS = 16;
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
-  uint8_t last_key = 0;
+  uint16_t last_key = 0;
   uint32_t force_frames = 4;
 
   uint32_t last_tick = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
@@ -229,7 +229,31 @@ int main(int argc, char **argv) {
     int cur_my = (int)my;
     int cur_mdown = (int)((m_btn & 1) != 0);
 
-    uint8_t cur_key = (uint8_t)_syscall(SYS_GET_SCANCODE, 0, 0, 0, 0, 0);
+    // --- Чтение клавиатуры с поддержкой extended-сканкодов (0xE0) ---------
+    // Ядро кладёт в FIFO `0xE0`, а затем фактический код стрелки/PgUp/PgDn/
+    // Home/End/Insert/Delete отдельным байтом. Если читать по одному байту
+    // за кадр (как делал старый цикл), Lua получала сначала 0xE0, а потом,
+    // например, 0x48 (=Numpad-8) и не могла отличить стрелку Up от цифры.
+    // Здесь дренируем буфер до полного события и склеиваем расширенные
+    // коды в `0x100 | code`.
+    static bool pending_ext = false;
+    uint16_t cur_key = 0;
+    for (int i = 0; i < 8; i++) {
+      uint8_t b = (uint8_t)_syscall(SYS_GET_SCANCODE, 0, 0, 0, 0, 0);
+      if (b == 0)
+        break;
+      if (b == 0xE0) {
+        pending_ext = true;
+        continue;
+      }
+      if (pending_ext) {
+        cur_key = (uint16_t)(0x100 | b);
+        pending_ext = false;
+      } else {
+        cur_key = (uint16_t)b;
+      }
+      break; // одно полное событие за кадр — остальное возьмём в следующем
+    }
 
     // 1. Сначала считываем текущее время ядра
     uint32_t now = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
