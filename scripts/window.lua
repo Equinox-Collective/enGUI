@@ -1,4 +1,3 @@
--- res/sysgui/window.lua
 local Window = {}
 Window.__index = Window
 
