@@ -1,4 +1,3 @@
--- res/sysgui/init.lua
 -- Equinox Desktop Environment (enGUI) - Modular Edition
 print("enGUI Desktop Environment: Loading modules...")
 
@@ -11,7 +10,10 @@ resizing_win = nil
 -- Флаг грязного кадра (отслеживается C-слоем)
 _G.needs_redraw = false
 
-local shift_pressed = false
+-- Глобальные состояния модификаторов ввода
+_G.shift_pressed = false
+_G.ctrl_pressed = false
+_G.alt_pressed = false
 
 -- Инициализируем модули
 local Window = dofile("res/sysgui/window.lua")
@@ -131,18 +133,41 @@ function on_tick(dt)
         end
     end
 
-    -- 3. Обработка ввода (Клавиатура)
+    -- 3. Обработка ввода (Клавиатура с аппаратной фильтрацией модификаторов)
     local key = getLastKey()
     if key > 0 then
-        if key == 42 or key == 54 then shift_pressed = true end
-        local char = scancodeToAscii(key, shift_pressed)
-
-        -- Просто отдаем событие активному окну, оно само знает, что делать
-        if focused_window and type(focused_window.handle_key) == "function" then
-            focused_window:handle_key(key, char)
+        -- Выделяем чистый сканкод без расширенного флага 0x100
+        local raw_code = key
+        if raw_code >= 0x100 then
+            raw_code = raw_code - 0x100
         end
-    else
-        shift_pressed = false
+
+        -- Точный парсинг нажатий (make) и отпусканий (break) для всех модификаторов
+        if raw_code == 42 or raw_code == 54 then
+            _G.shift_pressed = true
+        elseif raw_code == 170 or raw_code == 182 then
+            _G.shift_pressed = false
+        elseif raw_code == 29 then
+            _G.ctrl_pressed = true
+        elseif raw_code == 157 then
+            _G.ctrl_pressed = false
+        elseif raw_code == 56 then
+            _G.alt_pressed = true
+        elseif raw_code == 184 then
+            _G.alt_pressed = false
+        end
+
+        -- Фильтруем любые break-коды (отпускания клавиш), чтобы они не порождали символов
+        local is_release = (raw_code >= 128 and raw_code <= 255)
+
+        if not is_release then
+            local char = scancodeToAscii(key, _G.shift_pressed)
+
+            -- Передаем событие активному окну
+            if focused_window and type(focused_window.handle_key) == "function" then
+                focused_window:handle_key(key, char)
+            end
+        end
     end
 
     -- 4. Отрисовка иконок рабочего стола
