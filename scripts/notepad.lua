@@ -83,7 +83,7 @@ M.draw = function(win, mx, my, mdown, dt)
 
     -- 1. Шапка окна (Header)
     drawRect(win.x, win.y, win.w, 24, 0x2E303B)
-    drawText("VIM.LUA - NOTES.TXT", win.x + 8, win.y + 6, 0xE5E9F0)
+    drawText("EQVIM.LUA - NOTES.TXT", win.x + 8, win.y + 6, 0xE5E9F0)
 
     -- Кнопка Save для мышекликателей (а-ля гибридный режим)
     if button("SAVE", win.x + win.w - 55, win.y + 3, 50, 18) then
