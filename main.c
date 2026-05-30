@@ -16,6 +16,7 @@ uint32_t *backbuffer = NULL;
 uint32_t *draw_target = NULL;
 uint32_t screen_w = 1024;
 uint32_t screen_h = 768;
+extern void api_tick_audio(void);
 
 // --- СИСТЕМА ДИНАМИЧЕСКИХ ГРЯЗНЫХ ТАЙЛОВ ---
 #define TILE_SIZE 32
@@ -202,9 +203,26 @@ int main(int argc, char **argv) {
 
   register_gui_api(L);
 
+  // === ДЕБАГГЕР: Ловим ошибки синтаксиса при загрузке (КРАСНЫЙ ЭКРАН) ===
   if (luaL_dofile(L, "res/sysgui/init.lua")) {
-    printf("enGUI Lua Error: %s\n", lua_tostring(L, -1));
-    return 1;
+    const char *err_msg = lua_tostring(L, -1);
+    printf("enGUI Lua Load Error: %s\n", err_msg);
+    
+    // Заливаем экран темно-красным
+    for (uint32_t i = 0; i < screen_w * screen_h; i++) {
+      backbuffer[i] = 0x550000;
+    }
+    
+    eid_draw_text(backbuffer, screen_w, screen_h, 40, 50, "enGUI LUA SYNTAX ERROR", 0xFFFFFF);
+    eid_draw_text(backbuffer, screen_w, screen_h, 40, 80, err_msg, 0xFFFF00);
+    
+    sysgui_mark_all_dirty();
+    copy_dirty_to_vram();
+    
+    // Зависаем, чтобы разработчик мог прочитать лог
+    while (1) {
+      sys_sleep(1000);
+    }
   }
 
   const uint32_t TICK_MS = 1;
@@ -222,9 +240,6 @@ int main(int argc, char **argv) {
     if (fg == SYS_GET_FG_APP)
       fg = 0;
 
-    // --- БАЙПАС ДЛЯ ВНЕШНИХ ПРИЛОЖЕНИЙ (Браузер, Doom и т.д.) ---
-    // Если запущено приложение на переднем плане, sysgui засыпает
-    // и полностью освобождает видеопамять и буфер ввода.
     if (fg != 0) {
       sys_sleep(16);
       continue;
@@ -237,7 +252,6 @@ int main(int argc, char **argv) {
     int cur_my = (int)my;
     int cur_mdown = (int)((m_btn & 1) != 0);
 
-    // --- Чтение клавиатуры с поддержкой extended-сканкодов (0xE0) ---------
     static bool pending_ext = false;
     uint16_t cur_key = 0;
     for (int i = 0; i < 8; i++) {
@@ -285,17 +299,34 @@ int main(int argc, char **argv) {
       lua_getglobal(L, "on_tick");
       if (lua_isfunction(L, -1)) {
         lua_pushnumber(L, dt);
+        
+        // === ДЕБАГГЕР: Ловим ошибки выполнения во время работы (СИНИЙ ЭКРАН) ===
         if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-          printf("Lua Tick Error: %s\n", lua_tostring(L, -1));
-          break;
+          const char *err_msg = lua_tostring(L, -1);
+          printf("enGUI Lua Runtime Error: %s\n", err_msg);
+          
+          // Заливаем экран темно-синим
+          for (uint32_t i = 0; i < screen_w * screen_h; i++) {
+            backbuffer[i] = 0x000088;
+          }
+          
+          eid_draw_text(backbuffer, screen_w, screen_h, 40, 50, "enGUI LUA RUNTIME ERROR", 0xFFFFFF);
+          eid_draw_text(backbuffer, screen_w, screen_h, 40, 80, err_msg, 0xFFFF00);
+          
+          sysgui_mark_all_dirty();
+          copy_dirty_to_vram();
+          
+          while (1) {
+            sys_sleep(1000);
+          }
         }
       } else {
         lua_pop(L, 1);
       }
 
       lua_getglobal(L, "needs_redraw");
-      if (lua_toboolean(L, -1) && force_frames == 0)
-        force_frames = 1;
+      if (lua_toboolean(L, -1))
+        force_frames = 2; // <=== СТАВИМ ТУТ 2. Это разгонит цикл до 60 FPS и починит звук!
       lua_pop(L, 1);
 
       sysgui_mark_dirty(last_mx, last_my, 8, 8);
@@ -310,7 +341,7 @@ int main(int argc, char **argv) {
       last_mdown = cur_mdown;
       last_key = cur_key;
       if (force_frames > 0)
-        force_frames--;
+        force_frames--; 
 
       last_tick = now;
     }
@@ -323,6 +354,8 @@ int main(int argc, char **argv) {
       sys_yield();
     }
     frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+
+    api_tick_audio();
   }
 
   lua_close(L);
