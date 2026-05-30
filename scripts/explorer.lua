@@ -1,4 +1,3 @@
--- res/sysgui/explorer.lua
 local files_list = {}
 
 local function refresh_explorer()
