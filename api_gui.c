@@ -398,7 +398,30 @@ static int l_set_app_window_pos(lua_State *L) {
   return 0;
 }
 
+// Регистрируем именованные константы для extended-клавиш, чтобы Lua-скрипты
+// могли писать `if key == KEY_UP then ...` вместо магических чисел.
+// Значение = 0x100 | PS/2-set1 scancode (см. eid.h).
+static void register_key_constants(lua_State *L) {
+  struct { const char *name; int code; } keys[] = {
+      {"KEY_UP",     0x148}, {"KEY_DOWN",   0x150},
+      {"KEY_LEFT",   0x14B}, {"KEY_RIGHT",  0x14D},
+      {"KEY_PGUP",   0x149}, {"KEY_PGDN",   0x151},
+      {"KEY_HOME",   0x147}, {"KEY_END",    0x14F},
+      {"KEY_INSERT", 0x152}, {"KEY_DELETE", 0x153},
+      // Обычные (не-extended) полезные коды:
+      {"KEY_ENTER",     0x1C}, {"KEY_BACKSPACE", 0x0E},
+      {"KEY_TAB",       0x0F}, {"KEY_ESC",       0x01},
+      {"KEY_SPACE",     0x39}, {"KEY_LSHIFT",    0x2A},
+      {"KEY_RSHIFT",    0x36},
+  };
+  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+    lua_pushinteger(L, keys[i].code);
+    lua_setglobal(L, keys[i].name);
+  }
+}
+
 void register_gui_api(lua_State *L) {
+  register_key_constants(L);
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
   lua_register(L, "drawGradient", l_draw_gradient);
