@@ -11,17 +11,131 @@
 #include <stdlib.h>
 #include <string.h>
 
-
 extern uint32_t *draw_target;
 extern uint32_t screen_w, screen_h;
 extern eid_ctx_t eid_ctx;
 
-// Объявляем функцию пометки грязных тайлов из main.c
 extern void sysgui_mark_dirty(int x, int y, int w, int h);
 
 #define MAX_ANIMS 32
 static eid_anim_t anims[MAX_ANIMS];
 static int anim_count = 0;
+
+#pragma pack(push, 1)
+typedef struct {
+  char id[4];
+  uint32_t size;
+} ChunkHeader_t;
+
+typedef struct {
+  uint16_t fmt;
+  uint16_t ch;
+  uint32_t rate;
+  uint32_t brate;
+  uint16_t align;
+  uint16_t bps;
+} FmtChunk_t;
+#pragma pack(pop)
+
+static uint8_t *wav_pcm_data = NULL;
+static uint32_t wav_pcm_size = 0;
+static uint32_t wav_pcm_pos = 0;
+static bool wav_playing = false;
+
+void api_tick_audio(void) {
+  if (!wav_playing || !wav_pcm_data) return;
+
+  uint32_t chunk_size = 8192;
+  if (wav_pcm_pos + chunk_size > wav_pcm_size) {
+    chunk_size = wav_pcm_size - wav_pcm_pos;
+  }
+
+  if (chunk_size > 0) {
+    _syscall(20, (uint64_t)(wav_pcm_data + wav_pcm_pos), (uint64_t)chunk_size, 0, 0, 0);
+    wav_pcm_pos += chunk_size;
+  } else {
+    printf("[sysgui] api_tick_audio: Playback FINISHED successfully.\n");
+    wav_playing = false;
+    wav_pcm_data = NULL;
+    wav_pcm_size = 0;
+    wav_pcm_pos = 0;
+  }
+}
+
+static int l_play_sound(lua_State *L) {
+  const char *filename = luaL_checkstring(L, 1);
+  uint32_t size = 0;
+  
+  printf("[sysgui] l_play_sound: Request to play '%s'\n", filename);
+  
+  uint64_t addr = _syscall(2, (uint64_t)filename, (uint64_t)&size, 0, 0, 0);
+  if (!addr) {
+    printf("[sysgui] l_play_sound: ERROR - File not found or read failed (addr is NULL)\n");
+    lua_pushboolean(L, false);
+    return 1;
+  }
+
+  printf("[sysgui] l_play_sound: File successfully loaded. Addr: 0x%x, Size: %d bytes\n", addr, size);
+
+  if (size < 44) {
+    printf("[sysgui] l_play_sound: ERROR - File too small (%d bytes)\n", size);
+    lua_pushboolean(L, false);
+    return 1;
+  }
+
+  uint8_t *file_data = (uint8_t *)addr;
+  
+  if (memcmp(file_data, "RIFF", 4) != 0 || memcmp(file_data + 8, "WAVE", 4) != 0) {
+    printf("[sysgui] l_play_sound: ERROR - Invalid RIFF/WAVE header! Magic: %.4s, Format: %.4s\n", 
+           file_data, file_data + 8);
+    lua_pushboolean(L, false);
+    return 1;
+  }
+
+  FmtChunk_t fmt;
+  uint8_t *audio_ptr = NULL;
+  uint32_t audio_len = 0;
+  uint32_t offset = 12;
+  bool found_fmt = false;
+
+  while (offset < size - 8) {
+    ChunkHeader_t *ch = (ChunkHeader_t *)(file_data + offset);
+    if (memcmp(ch->id, "fmt ", 4) == 0) {
+      memcpy(&fmt, file_data + offset + 8, 16);
+      found_fmt = true;
+      printf("[sysgui] l_play_sound: Found 'fmt ' chunk. Rate: %d Hz, Ch: %d, BPS: %d\n", 
+             fmt.rate, fmt.ch, fmt.bps);
+    } else if (memcmp(ch->id, "data", 4) == 0) {
+      audio_len = ch->size;
+      audio_ptr = file_data + offset + 8;
+      printf("[sysgui] l_play_sound: Found 'data' chunk. Size: %d bytes\n", audio_len);
+      break;
+    }
+    
+    uint32_t next_offset = offset + 8 + ch->size;
+    if (next_offset <= offset || next_offset >= size) {
+      break;
+    }
+    offset = next_offset;
+  }
+
+  if (audio_ptr && audio_len > 0 && found_fmt) {
+    _syscall(21, fmt.rate, 0, 0, 0, 0);
+    printf("[sysgui] l_play_sound: AC97 rate configured to %d Hz. Playback starting...\n", fmt.rate);
+
+    wav_pcm_data = audio_ptr; 
+    wav_pcm_size = audio_len;
+    wav_pcm_pos = 0;
+    wav_playing = true;
+    lua_pushboolean(L, true);
+  } else {
+    printf("[sysgui] l_play_sound: ERROR - Failed to parse. data_found=%s, fmt_found=%s\n", 
+           audio_ptr ? "true" : "false", found_fmt ? "true" : "false");
+    lua_pushboolean(L, false);
+  }
+  return 1;
+}
+
 
 bool is_any_anim_active(void) {
   for (int i = 0; i < anim_count; i++) {
@@ -83,7 +197,6 @@ static int l_draw_text(lua_State *L) {
 
   eid_draw_text(draw_target, screen_w, screen_h, x, y, str, color);
 
-  // Помечаем область текста грязной (высота шрифта PSF1 - 16 пикселей)
   int text_len = strlen(str);
   sysgui_mark_dirty(x, y, text_len * 8, 16);
 
@@ -98,9 +211,7 @@ static int l_draw_rect(lua_State *L) {
   uint32_t color = (uint32_t)luaL_checknumber(L, 5);
 
   eid_draw_rect(draw_target, screen_w, screen_h, x, y, w, h, color);
-
   sysgui_mark_dirty(x, y, w, h);
-
   return 0;
 }
 
@@ -115,9 +226,7 @@ static int l_draw_gradient(lua_State *L) {
 
   eid_draw_gradient_rect(draw_target, screen_w, screen_h, x, y, w, h, c1, c2,
                          vertical);
-
   sysgui_mark_dirty(x, y, w, h);
-
   return 0;
 }
 
@@ -130,7 +239,6 @@ static int l_draw_line(lua_State *L) {
 
   eid_draw_line(draw_target, screen_w, screen_h, x1, y1, x2, y2, color);
 
-  // Находим границы линии для пометки грязной области
   int min_x = x1 < x2 ? x1 : x2;
   int min_y = y1 < y2 ? y1 : y2;
   int w = (x1 > x2 ? x1 : x2) - min_x + 1;
@@ -148,8 +256,6 @@ static int l_button(lua_State *L) {
   int h = luaL_checkinteger(L, 5);
 
   uint32_t state = eid_button(&eid_ctx, label, x, y, w, h);
-
-  // Кнопка рисует тень и тело — пометим область с запасом
   sysgui_mark_dirty(x - 2, y - 2, w + 4, h + 6);
 
   lua_pushboolean(L, (state & EID_STATE_CLICKED) != 0);
@@ -164,7 +270,6 @@ static int l_checkbox(lua_State *L) {
 
   eid_checkbox(&eid_ctx, label, x, y, &val);
 
-  // Чекбокс имеет фиксированный размер 18px + длину текста лейбла
   int label_len = strlen(label);
   sysgui_mark_dirty(x, y, 18 + 8 + label_len * 8, 20);
 
@@ -182,8 +287,6 @@ static int l_slider(lua_State *L) {
   float max = (float)luaL_checknumber(L, 7);
 
   eid_slider(&eid_ctx, label, x, y, w, &val, min, max);
-
-  // Слайдер имеет высоту ползунка ~22px
   sysgui_mark_dirty(x, y - 4, w, 26);
 
   lua_pushnumber(L, val);
@@ -398,9 +501,6 @@ static int l_set_app_window_pos(lua_State *L) {
   return 0;
 }
 
-// Регистрируем именованные константы для extended-клавиш, чтобы Lua-скрипты
-// могли писать `if key == KEY_UP then ...` вместо магических чисел.
-// Значение = 0x100 | PS/2-set1 scancode (см. eid.h).
 static void register_key_constants(lua_State *L) {
   struct { const char *name; int code; } keys[] = {
       {"KEY_UP",     0x148}, {"KEY_DOWN",   0x150},
@@ -408,7 +508,6 @@ static void register_key_constants(lua_State *L) {
       {"KEY_PGUP",   0x149}, {"KEY_PGDN",   0x151},
       {"KEY_HOME",   0x147}, {"KEY_END",    0x14F},
       {"KEY_INSERT", 0x152}, {"KEY_DELETE", 0x153},
-      // Обычные (не-extended) полезные коды:
       {"KEY_ENTER",     0x1C}, {"KEY_BACKSPACE", 0x0E},
       {"KEY_TAB",       0x0F}, {"KEY_ESC",       0x01},
       {"KEY_SPACE",     0x39}, {"KEY_LSHIFT",    0x2A},
@@ -454,4 +553,7 @@ void register_gui_api(lua_State *L) {
   lua_register(L, "shellExec", l_shell_exec);
   lua_register(L, "drawBlur", l_draw_blur);
   lua_register(L, "setAppWindowPos", l_set_app_window_pos);
+  
+  // Регистрируем новую функцию в Lua
+  lua_register(L, "playSound", l_play_sound);
 }
