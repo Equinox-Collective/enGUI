@@ -1,4 +1,3 @@
--- res/sysgui/paint.lua
 local paint_strokes = {} 
 local active_stroke = nil
 local active_color = 0xFF0000
