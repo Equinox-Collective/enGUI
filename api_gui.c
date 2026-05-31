@@ -14,6 +14,9 @@
 extern uint32_t *draw_target;
 extern uint32_t screen_w, screen_h;
 extern eid_ctx_t eid_ctx;
+extern int k_app_win_x, k_app_win_y, k_app_win_w, k_app_win_h;
+extern bool k_app_win_active;
+
 
 extern void sysgui_mark_dirty(int x, int y, int w, int h);
 
@@ -55,6 +58,10 @@ void api_tick_audio(void) {
     wav_pcm_pos += chunk_size;
   } else {
     printf("[sysgui] api_tick_audio: Playback FINISHED successfully.\n");
+    
+    // СТОПИМ КАРТУ, чтобы в QEMU не зацикливался последний буфер!
+    _syscall(20, 0, 0, 0, 0, 0);
+
     wav_playing = false;
     wav_pcm_data = NULL;
     wav_pcm_size = 0;
@@ -496,6 +503,14 @@ static int l_set_app_window_pos(lua_State *L) {
   int w = luaL_checkinteger(L, 3);
   int h = luaL_checkinteger(L, 4);
 
+  // 1. Обновляем копию в юзерспейсе (для copy_dirty_to_vram в main.c)
+  k_app_win_x = x;
+  k_app_win_y = y;
+  k_app_win_w = w;
+  k_app_win_h = h;
+  k_app_win_active = (w > 0 && h > 0);
+
+  // 2. Отправляем сисколл в ядро (для блокировки ввода в syscall.c)
   _syscall(36, (uint64_t)x, (uint64_t)y, (uint64_t)w, (uint64_t)h, 0);
 
   return 0;

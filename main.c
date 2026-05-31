@@ -17,6 +17,11 @@ uint32_t *draw_target = NULL;
 uint32_t screen_w = 1024;
 uint32_t screen_h = 768;
 extern void api_tick_audio(void);
+int k_app_win_x = 100;
+int k_app_win_y = 100;
+int k_app_win_w = 640;
+int k_app_win_h = 400;
+bool k_app_win_active = false;
 
 // --- СИСТЕМА ДИНАМИЧЕСКИХ ГРЯЗНЫХ ТАЙЛОВ ---
 #define TILE_SIZE 32
@@ -111,12 +116,14 @@ void copy_dirty_to_vram(void) {
   if (!dirty_grid)
     return;
 
+  // Получаем координаты окна запущенного приложения
+  extern int k_app_win_x, k_app_win_y, k_app_win_w, k_app_win_h;
+  extern bool k_app_win_active;
+
   for (int r = 0; r < grid_rows; r++) {
     int c = 0;
     while (c < grid_cols) {
       if (dirty_grid[r * grid_cols + c]) {
-        // Ищем непрерывную последовательность "грязных" тайлов в строке для
-        // пакетного копирования
         int start_col = c;
         while (c < grid_cols && dirty_grid[r * grid_cols + c]) {
           c++;
@@ -128,17 +135,44 @@ void copy_dirty_to_vram(void) {
         if (x + width_pixels > (int)screen_w) {
           width_pixels = (int)screen_w - x;
         }
-        int bytes_to_copy = width_pixels * 4;
 
-        // Копируем строки внутри этого горизонтального среза
         for (int line = 0; line < TILE_SIZE; line++) {
           int pixel_y = r * TILE_SIZE + line;
           if (pixel_y >= (int)screen_h)
             break;
 
-          uint32_t *src = &backbuffer[pixel_y * screen_w + x];
-          uint32_t *dst = &vram[pixel_y * screen_w + x];
-          fast_memcpy_sse(dst, src, bytes_to_copy);
+          // Если строка пересекает окно Doom, копируем левую и правую части
+          // строго через стандартный безопасный memcpy (он не требует 16-байтового выравнивания)
+          if (k_app_win_active && 
+              pixel_y >= k_app_win_y && pixel_y < k_app_win_y + k_app_win_h) {
+              
+              // Копируем часть строки слева от окна
+              int left_copy_w = k_app_win_x - x;
+              if (left_copy_w > width_pixels) left_copy_w = width_pixels;
+              
+              if (left_copy_w > 0) {
+                  memcpy(&vram[pixel_y * screen_w + x], 
+                         &backbuffer[pixel_y * screen_w + x], 
+                         left_copy_w * 4);
+              }
+              
+              // Копируем часть строки справа от окна
+              int right_start_x = k_app_win_x + k_app_win_w;
+              int right_copy_offset = right_start_x - x;
+              if (right_copy_offset < width_pixels) {
+                  int right_copy_w = width_pixels - right_copy_offset;
+                  if (right_copy_w > 0) {
+                      memcpy(&vram[pixel_y * screen_w + right_start_x], 
+                             &backbuffer[pixel_y * screen_w + right_start_x], 
+                             right_copy_w * 4);
+                  }
+              }
+          } else {
+              // Вне окна копируем всю грязную линию целиком (здесь выравнивание по TILE_SIZE гарантировано)
+              uint32_t *src = &backbuffer[pixel_y * screen_w + x];
+              uint32_t *dst = &vram[pixel_y * screen_w + x];
+              fast_memcpy_sse(dst, src, width_pixels * 4);
+          }
         }
       } else {
         c++;
@@ -236,14 +270,14 @@ int main(int argc, char **argv) {
   uint32_t frame_start = last_tick;
 
   while (1) {
-    uint64_t fg = _syscall(SYS_GET_FG_APP, 0, 0, 0, 0, 0);
-    if (fg == SYS_GET_FG_APP)
-      fg = 0;
+    // uint64_t fg = _syscall(SYS_GET_FG_APP, 0, 0, 0, 0, 0);
+    // if (fg == SYS_GET_FG_APP)
+    //   fg = 0;
 
-    if (fg != 0) {
-      sys_sleep(16);
-      continue;
-    }
+    // if (fg != 0) {
+    //   sys_sleep(16);
+    //   continue;
+    // }
 
     uint64_t mx = 0, my = 0, m_btn = 0;
     __asm__ volatile("mov $7, %%rax\n int $0x80"
@@ -273,10 +307,14 @@ int main(int argc, char **argv) {
 
     uint32_t now = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
-    int need_redraw = (force_frames > 0) || (cur_mx != last_mx) ||
-                      (cur_my != last_my) || (cur_mdown != last_mdown) ||
-                      (cur_key != 0 && cur_key != last_key) ||
-                      is_any_anim_active() || (now - last_tick >= 500);
+    int need_redraw = (force_frames > 0) || 
+                      (cur_mx != last_mx) || 
+                      (cur_my != last_my) || 
+                      (cur_mdown != last_mdown) ||
+                      (cur_key != 0) || 
+                      is_any_anim_active() || 
+                      k_app_win_active ||  // <--- ПРОСТО ЗАМЕНИТЕ НА k_app_win_active
+                      (now - last_tick >= 100);
 
     if (need_redraw) {
       uint32_t elapsed = now - last_tick;
