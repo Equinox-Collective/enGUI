@@ -265,6 +265,7 @@ int main(int argc, char **argv) {
   int last_mdown = -1;
   uint16_t last_key = 0;
   uint32_t force_frames = 4;
+  uint32_t high_resp_frames = 0; // <--- Счетчик кадров повышенной отзывчивости
 
   uint32_t last_tick = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
   uint32_t frame_start = last_tick;
@@ -307,13 +308,18 @@ int main(int argc, char **argv) {
 
     uint32_t now = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
+    // Если нажата клавиша или кликнули мышкой — включаем режим отзывчивости на 60 кадров (~1 секунда)
+    if (cur_key != 0 || cur_mdown != last_mdown) {
+      high_resp_frames = 60;
+    }
+
     int need_redraw = (force_frames > 0) || 
                       (cur_mx != last_mx) || 
                       (cur_my != last_my) || 
                       (cur_mdown != last_mdown) ||
                       (cur_key != 0) || 
                       is_any_anim_active() || 
-                      k_app_win_active ||  // <--- ПРОСТО ЗАМЕНИТЕ НА k_app_win_active
+                      k_app_win_active ||  
                       (now - last_tick >= 100);
 
     if (need_redraw) {
@@ -386,10 +392,16 @@ int main(int argc, char **argv) {
 
     uint32_t frame_end = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
     uint32_t frame_elapsed = frame_end - frame_start;
-    if (frame_elapsed < TARGET_FRAME_MS) {
-      sys_sleep(TARGET_FRAME_MS - frame_elapsed);
+
+    if (high_resp_frames > 0) {
+      high_resp_frames--;
+      sys_yield(); // Уступаем CPU вместо сна, убирая любые задержки при вводе текста
     } else {
-      sys_yield();
+      if (frame_elapsed < TARGET_FRAME_MS) {
+        sys_sleep(TARGET_FRAME_MS - frame_elapsed);
+      } else {
+        sys_yield();
+      }
     }
     frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
