@@ -116,6 +116,17 @@ void copy_dirty_to_vram(void) {
   if (!dirty_grid)
     return;
 
+  // Первый реальный present кадра GUI: просим ядро погасить boot-анимацию
+  // Nyan Cat (всё это время её крутил PIT-таймер ядра, см. src/system/misc/
+  // timer.c + src/boot/eqstart.c). Делаем это ровно здесь, чтобы между
+  // последним кадром гифки и первым кадром рабочего стола НЕ было заметной
+  // «заморозки». syscall 88 = SYS_BOOT_ANIM_DONE.
+  static int g_boot_anim_signaled = 0;
+  if (!g_boot_anim_signaled) {
+    g_boot_anim_signaled = 1;
+    _syscall(88, 0, 0, 0, 0, 0);
+  }
+
   // Получаем координаты окна запущенного приложения
   extern int k_app_win_x, k_app_win_y, k_app_win_w, k_app_win_h;
   extern bool k_app_win_active;
@@ -232,6 +243,14 @@ int main(int argc, char **argv) {
   eid_init();
   memset(&eid_ctx, 0, sizeof(eid_ctx));
 
+  // ПРИМЕЧАНИЕ: Nyan Cat намеренно НЕ гасится здесь. Пока ниже грузятся и
+  // парсятся lua-скрипты (window/terminal/paint/... + bootvid), kernel-таймер
+  // продолжает крутить гифку прямо на фреймбуфере. Чтобы она не «замерзала» на
+  // время блокирующих сисколлов (чтения с диска / serial), ядро на время
+  // boot-анимации держит шлюз int 0x80 как trap gate — прерывания не гасятся
+  // во время сисколлов, и PIT успевает крутить кадры. Гасим анимацию только на
+  // ПЕРВОМ реальном present GUI (syscall 88 внутри copy_dirty_to_vram).
+
   lua_State *L = luaL_newstate();
   luaL_openlibs(L);
 
@@ -265,6 +284,7 @@ int main(int argc, char **argv) {
   int last_mdown = -1;
   uint16_t last_key = 0;
   uint32_t force_frames = 4;
+  uint32_t high_resp_frames = 0; // <--- Счетчик кадров повышенной отзывчивости
 
   uint32_t last_tick = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
   uint32_t frame_start = last_tick;
@@ -307,13 +327,18 @@ int main(int argc, char **argv) {
 
     uint32_t now = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
+    // Если нажата клавиша или кликнули мышкой — включаем режим отзывчивости на 60 кадров (~1 секунда)
+    if (cur_key != 0 || cur_mdown != last_mdown) {
+      high_resp_frames = 60;
+    }
+
     int need_redraw = (force_frames > 0) || 
                       (cur_mx != last_mx) || 
                       (cur_my != last_my) || 
                       (cur_mdown != last_mdown) ||
                       (cur_key != 0) || 
                       is_any_anim_active() || 
-                      k_app_win_active ||  // <--- ПРОСТО ЗАМЕНИТЕ НА k_app_win_active
+                      k_app_win_active ||  
                       (now - last_tick >= 100);
 
     if (need_redraw) {
@@ -386,10 +411,16 @@ int main(int argc, char **argv) {
 
     uint32_t frame_end = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
     uint32_t frame_elapsed = frame_end - frame_start;
-    if (frame_elapsed < TARGET_FRAME_MS) {
-      sys_sleep(TARGET_FRAME_MS - frame_elapsed);
+
+    if (high_resp_frames > 0) {
+      high_resp_frames--;
+      sys_yield(); // Уступаем CPU вместо сна, убирая любые задержки при вводе текста
     } else {
-      sys_yield();
+      if (frame_elapsed < TARGET_FRAME_MS) {
+        sys_sleep(TARGET_FRAME_MS - frame_elapsed);
+      } else {
+        sys_yield();
+      }
     }
     frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
