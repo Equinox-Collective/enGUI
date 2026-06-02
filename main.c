@@ -288,16 +288,30 @@ int main(int argc, char **argv) {
 
   uint32_t last_tick = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
   uint32_t frame_start = last_tick;
+  uint64_t last_fg = 0;
 
   while (1) {
-    // uint64_t fg = _syscall(SYS_GET_FG_APP, 0, 0, 0, 0, 0);
-    // if (fg == SYS_GET_FG_APP)
-    //   fg = 0;
+    uint64_t fg = _syscall(SYS_GET_FG_APP, 0, 0, 0, 0, 0);
+    if (fg == SYS_GET_FG_APP)
+      fg = 0;
 
-    // if (fg != 0) {
-    //   sys_sleep(16);
-    //   continue;
-    // }
+    // Пока активен полноэкранный foreground-ELF (например browser.elf или
+    // doom), он рисует через SYS_DRAW_BUFFER в ту же VRAM, что и sysgui через
+    // copy_dirty_to_vram(). Без этой проверки оба процесса гонят свои кадры
+    // наперегонки — видно как сильное мерцание / затирание поверх окна
+    // приложения. Пока fg != 0, sysgui просто спит и не трогает экран. Когда
+    // foreground отпускает фокус (SYS_EXIT обнуляет fg_app_pid в ядре),
+    // форсируем полный перерисов рабочего стола.
+    if (fg != 0) {
+      last_fg = fg;
+      sys_sleep(TARGET_FRAME_MS);
+      frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+      continue;
+    }
+    if (last_fg != 0) {
+      force_frames = 4;
+      last_fg = 0;
+    }
 
     uint64_t mx = 0, my = 0, m_btn = 0;
     __asm__ volatile("mov $7, %%rax\n int $0x80"
