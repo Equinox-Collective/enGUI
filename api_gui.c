@@ -69,31 +69,17 @@ void api_tick_audio(void) {
   }
 }
 
-// Загружает WAV с диска, парсит RIFF/WAVE и запускает потоковое воспроизведение
-// через AC'97 (далее буферы докармливает api_tick_audio()). Возвращает true при
-// успехе. Используется и Lua-функцией playSound, и звуком запуска ОС.
-static bool play_wav_file(const char *filename) {
-  uint32_t size = 0;
-
-  printf("[sysgui] play_wav_file: Request to play '%s'\n", filename);
-
-  uint64_t addr = _syscall(2, (uint64_t)filename, (uint64_t)&size, 0, 0, 0);
-  if (!addr) {
-    printf("[sysgui] play_wav_file: ERROR - File not found or read failed (addr is NULL)\n");
-    return false;
-  }
-
-  printf("[sysgui] play_wav_file: File successfully loaded. Addr: 0x%x, Size: %d bytes\n", addr, size);
-
+// Парсит уже загруженный в память WAV (RIFF/WAVE PCM). НЕ трогает AC'97 и не
+// запускает воспроизведение — только находит data-чанк и частоту. Возвращает
+// true и заполняет out_pcm/out_len/out_rate при успехе.
+static bool parse_wav(uint8_t *file_data, uint32_t size,
+                      uint8_t **out_pcm, uint32_t *out_len, uint32_t *out_rate) {
   if (size < 44) {
-    printf("[sysgui] play_wav_file: ERROR - File too small (%d bytes)\n", size);
+    printf("[sysgui] parse_wav: ERROR - File too small (%d bytes)\n", size);
     return false;
   }
-
-  uint8_t *file_data = (uint8_t *)addr;
-
   if (memcmp(file_data, "RIFF", 4) != 0 || memcmp(file_data + 8, "WAVE", 4) != 0) {
-    printf("[sysgui] play_wav_file: ERROR - Invalid RIFF/WAVE header! Magic: %.4s, Format: %.4s\n",
+    printf("[sysgui] parse_wav: ERROR - Invalid RIFF/WAVE header! Magic: %.4s, Format: %.4s\n",
            file_data, file_data + 8);
     return false;
   }
@@ -109,36 +95,55 @@ static bool play_wav_file(const char *filename) {
     if (memcmp(ch->id, "fmt ", 4) == 0) {
       memcpy(&fmt, file_data + offset + 8, 16);
       found_fmt = true;
-      printf("[sysgui] play_wav_file: Found 'fmt ' chunk. Rate: %d Hz, Ch: %d, BPS: %d\n",
+      printf("[sysgui] parse_wav: Found 'fmt ' chunk. Rate: %d Hz, Ch: %d, BPS: %d\n",
              fmt.rate, fmt.ch, fmt.bps);
     } else if (memcmp(ch->id, "data", 4) == 0) {
       audio_len = ch->size;
       audio_ptr = file_data + offset + 8;
-      printf("[sysgui] play_wav_file: Found 'data' chunk. Size: %d bytes\n", audio_len);
+      printf("[sysgui] parse_wav: Found 'data' chunk. Size: %d bytes\n", audio_len);
       break;
     }
-
     uint32_t next_offset = offset + 8 + ch->size;
-    if (next_offset <= offset || next_offset >= size) {
-      break;
-    }
+    if (next_offset <= offset || next_offset >= size) break;
     offset = next_offset;
   }
 
   if (audio_ptr && audio_len > 0 && found_fmt) {
-    _syscall(21, fmt.rate, 0, 0, 0, 0);
-    printf("[sysgui] play_wav_file: AC97 rate configured to %d Hz. Playback starting...\n", fmt.rate);
-
-    wav_pcm_data = audio_ptr;
-    wav_pcm_size = audio_len;
-    wav_pcm_pos = 0;
-    wav_playing = true;
+    *out_pcm = audio_ptr;
+    *out_len = audio_len;
+    *out_rate = fmt.rate;
     return true;
   }
-
-  printf("[sysgui] play_wav_file: ERROR - Failed to parse. data_found=%s, fmt_found=%s\n",
+  printf("[sysgui] parse_wav: ERROR - Failed to parse. data_found=%s, fmt_found=%s\n",
          audio_ptr ? "true" : "false", found_fmt ? "true" : "false");
   return false;
+}
+
+// Немедленно начинает воспроизведение: настраивает AC'97 на нужную частоту и
+// взводит wav_playing (далее буферы докармливает api_tick_audio()).
+static void start_playback(uint8_t *pcm, uint32_t len, uint32_t rate) {
+  _syscall(21, rate, 0, 0, 0, 0);
+  printf("[sysgui] start_playback: AC97 rate %d Hz, %d bytes. Playback starting...\n", rate, len);
+  wav_pcm_data = pcm;
+  wav_pcm_size = len;
+  wav_pcm_pos  = 0;
+  wav_playing  = true;
+}
+
+// Загружает WAV с диска (syscall 2 — БЛОКИРУЮЩЕЕ чтение по ATA-PIO), парсит и
+// сразу запускает воспроизведение. Используется Lua-функцией playSound.
+static bool play_wav_file(const char *filename) {
+  uint32_t size = 0;
+  printf("[sysgui] play_wav_file: Request to play '%s'\n", filename);
+  uint64_t addr = _syscall(2, (uint64_t)filename, (uint64_t)&size, 0, 0, 0);
+  if (!addr) {
+    printf("[sysgui] play_wav_file: ERROR - File not found or read failed (addr is NULL)\n");
+    return false;
+  }
+  uint8_t *pcm; uint32_t len, rate;
+  if (!parse_wav((uint8_t *)addr, size, &pcm, &len, &rate)) return false;
+  start_playback(pcm, len, rate);
+  return true;
 }
 
 static int l_play_sound(lua_State *L) {
@@ -148,10 +153,16 @@ static int l_play_sound(lua_State *L) {
 }
 
 // === ЗВУК ЗАПУСКА ОС ===
-// Раньше звук запускался из bootvid.lua, но при быстрой загрузке звуковая карта
-// (AC'97) инициализируется в фоновом потоке ПОСЛЕ старта рабочего стола, поэтому
-// к моменту короткого сплэша она ещё не готова. Здесь мы дожидаемся готовности
-// карты (syscall 22) и проигрываем звук РОВНО ОДИН раз — он стримится в фоне.
+// При быстрой загрузке звуковая карта (AC'97) инициализируется в ФОНОВОМ потоке
+// ПОСЛЕ старта рабочего стола, поэтому к моменту короткого сплэша она ещё не
+// готова. Чтение же 846/423КБ WAV с диска по ATA-PIO на whpx ОЧЕНЬ медленное
+// (каждый опрос порта = VM-exit), и если делать его в главном цикле отрисовки —
+// рабочий стол замирает на ~10 c (чёрный экран).
+//
+// Решение: ФАЙЛ ГРУЗИМ ОДИН РАЗ ЗАРАНЕЕ — api_preload_boot_sound() вызывается ДО
+// главного цикла, пока ещё крутится kernel-сплэш (анимация не замирает на
+// блокирующих сисколлах). А запуск воспроизведения (дёшево, без чтения диска)
+// откладываем до готовности AC'97 — api_try_boot_sound() в главном цикле.
 #ifndef BOOT_SOUND_ENABLED
 #define BOOT_SOUND_ENABLED 1
 #endif
@@ -159,16 +170,37 @@ static int l_play_sound(lua_State *L) {
 
 static int audio_is_ready(void) { return (int)_syscall(22, 0, 0, 0, 0, 0); }
 
+static uint8_t *boot_pcm = NULL;
+static uint32_t boot_len = 0, boot_rate = 0;
+static bool     boot_loaded = false;
+
+// Грузит и парсит звук запуска В ПАМЯТЬ (без старта). Вызывать ОДИН раз до цикла.
+void api_preload_boot_sound(void) {
+#if BOOT_SOUND_ENABLED
+  uint32_t size = 0;
+  printf("[sysgui] api_preload_boot_sound: loading '%s'\n", BOOT_SOUND_PATH);
+  uint64_t addr = _syscall(2, (uint64_t)BOOT_SOUND_PATH, (uint64_t)&size, 0, 0, 0);
+  if (!addr) {
+    printf("[sysgui] api_preload_boot_sound: ERROR - File not found (addr is NULL)\n");
+    return;
+  }
+  if (parse_wav((uint8_t *)addr, size, &boot_pcm, &boot_len, &boot_rate)) {
+    boot_loaded = true;
+    printf("[sysgui] api_preload_boot_sound: ready (%d bytes @ %d Hz)\n", boot_len, boot_rate);
+  }
+#endif
+}
+
+// Запускает заранее загруженный звук запуска ОДИН раз, как только готов AC'97.
+// Дёшево: никакого чтения диска здесь нет.
 void api_try_boot_sound(void) {
 #if BOOT_SOUND_ENABLED
-  static bool s_boot_sound_done = false;
-  if (s_boot_sound_done) return;     // уже отыграли (или попытались)
-  if (wav_playing) return;           // что-то уже играет — не перебиваем
-  if (!audio_is_ready()) return;     // ждём инициализации AC'97 (фоновый hw_init)
-
-  // Готова — грузим и запускаем (файл читается с диска ровно один раз).
-  play_wav_file(BOOT_SOUND_PATH);
-  s_boot_sound_done = true;          // больше не пытаемся, даже если не удалось
+  static bool s_done = false;
+  if (s_done || !boot_loaded) return;
+  if (wav_playing) return;        // что-то уже играет — не перебиваем
+  if (!audio_is_ready()) return;  // ждём инициализации AC'97 (фоновый hw_init)
+  start_playback(boot_pcm, boot_len, boot_rate);
+  s_done = true;
 #endif
 }
 
