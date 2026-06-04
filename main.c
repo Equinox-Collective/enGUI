@@ -256,6 +256,15 @@ int main(int argc, char **argv) {
 
   register_gui_api(L);
 
+  // Останавливаем сборщик мусора на время загрузки всех скриптов (init.lua
+  // через dofile тянет ещё 7 модулей). При загрузке создаётся МНОГО мелких
+  // объектов (строки токенов, прототипы функций), и инкрементальный GC по
+  // умолчанию гоняет проходы кучи прямо во время парсинга -> заметные паузы.
+  // Выключаем GC, грузим всё, затем один раз собираем мусор и включаем обратно.
+  printf("[GUI T=%u] lua load begin (GC stopped)\n",
+         (unsigned)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0));
+  lua_gc(L, LUA_GCSTOP, 0);
+
   // === ДЕБАГГЕР: Ловим ошибки синтаксиса при загрузке (КРАСНЫЙ ЭКРАН) ===
   if (luaL_dofile(L, "res/sysgui/init.lua")) {
     const char *err_msg = lua_tostring(L, -1);
@@ -277,6 +286,12 @@ int main(int argc, char **argv) {
       sys_sleep(1000);
     }
   }
+
+  // Загрузка завершена: один полный сбор мусора и возвращаем GC в работу.
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  lua_gc(L, LUA_GCRESTART, 0);
+  printf("[GUI T=%u] lua load end (GC restarted)\n",
+         (unsigned)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0));
 
   const uint32_t TICK_MS = 1;
   const uint32_t TARGET_FRAME_MS = 16;
