@@ -17,6 +17,7 @@ uint32_t *draw_target = NULL;
 uint32_t screen_w = 1024;
 uint32_t screen_h = 768;
 extern void api_tick_audio(void);
+extern void api_try_boot_sound(void);
 int k_app_win_x = 100;
 int k_app_win_y = 100;
 int k_app_win_w = 640;
@@ -454,6 +455,7 @@ int main(int argc, char **argv) {
     frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
     api_tick_audio();
+    api_try_boot_sound(); // однократно запустит звук запуска, когда карта готова
   }
 
   lua_close(L);
