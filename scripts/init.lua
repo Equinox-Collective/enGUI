@@ -25,26 +25,27 @@ local function _make_lazy(path)
         return mod
     end
 end
--- Для модулей, отдающих таблицу {draw, handle_key} (terminal, notepad):
-local function lazy_app(path)
+-- Единая обёртка: модуль может вернуть либо таблицу {draw, handle_key}
+-- (terminal/notepad/monitor), либо просто функцию рисования (paint). Повторяет
+-- логику Window.new, но загрузка модуля откладывается до первого вызова.
+local function lazy_win(path)
     local get = _make_lazy(path)
-    local draw_cb = function(...) return get().draw(...) end
+    local draw_cb = function(...)
+        local m = get()
+        if type(m) == "table" then return m.draw(...) end
+        return m(...)
+    end
     local key_cb = function(...)
         local m = get()
-        if m.handle_key then return m.handle_key(...) end
+        if type(m) == "table" and m.handle_key then return m.handle_key(...) end
     end
     return draw_cb, key_cb
 end
--- Для модулей, отдающих просто функцию рисования (monitor, paint):
-local function lazy_fn(path)
-    local get = _make_lazy(path)
-    return function(...) return get()(...) end
-end
 
-local draw_terminal, key_terminal = lazy_app("res/sysgui/terminal.lua")
-local draw_notepad, key_notepad = lazy_app("res/sysgui/notepad.lua")
-local draw_monitor = lazy_fn("res/sysgui/monitor.lua")
-local draw_paint = lazy_fn("res/sysgui/paint.lua")
+local draw_terminal, key_terminal = lazy_win("res/sysgui/terminal.lua")
+local draw_notepad, key_notepad = lazy_win("res/sysgui/notepad.lua")
+local draw_monitor, key_monitor = lazy_win("res/sysgui/monitor.lua")
+local draw_paint, key_paint = lazy_win("res/sysgui/paint.lua")
 local draw_explorer = dofile("res/sysgui/explorer.lua")
 
 local app_container = Window.new("External Application", 250, 150, 640, 400, nil)
@@ -148,8 +149,8 @@ local desktop_icons = {
 }
 
 table.insert(windows, Window.new("Equinox Terminal", 50, 80, 520, 340, draw_terminal, key_terminal))
-table.insert(windows, Window.new("System Monitor", 620, 80, 340, 220, draw_monitor))
-table.insert(windows, Window.new("Vector Paint Brush", 120, 200, 440, 320, draw_paint))
+table.insert(windows, Window.new("System Monitor", 620, 80, 340, 220, draw_monitor, key_monitor))
+table.insert(windows, Window.new("Vector Paint Brush", 120, 200, 440, 320, draw_paint, key_paint))
 table.insert(windows, Window.new("VFS File Explorer", 400, 150, 360, 280, draw_explorer))
 table.insert(windows, Window.new("Notepad Text Editor", 100, 100, 420, 280, draw_notepad, key_notepad))
 
