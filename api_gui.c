@@ -45,6 +45,10 @@ static uint32_t wav_pcm_size = 0;
 static uint32_t wav_pcm_pos = 0;
 static bool wav_playing = false;
 
+// Указатель на главный lua_State (ставится в register_gui_api). Нужен, чтобы C
+// мог прочитать пользовательские настройки из boot-конфига (bootvid.lua).
+static lua_State *g_lua = NULL;
+
 void api_tick_audio(void) {
   if (!wav_playing || !wav_pcm_data) return;
 
@@ -170,6 +174,19 @@ static int l_play_sound(lua_State *L) {
 
 static int audio_is_ready(void) { return (int)_syscall(22, 0, 0, 0, 0, 0); }
 
+// Пользовательская настройка из boot-конфига (bootvid.lua): глобальная
+// переменная BOOT_SOUND_ENABLED. true/не задана = звук играть, false = молча
+// пропустить. Это единственный переключатель, которым пользователь выключает
+// музыку при старте системы (компиляция от него не зависит).
+static bool boot_sound_cfg_enabled(void) {
+  if (!g_lua) return true;  // нет lua — поведение по умолчанию: звук включён
+  lua_getglobal(g_lua, "BOOT_SOUND_ENABLED");
+  bool enabled = true;      // если переменная не задана (nil) — считаем включённым
+  if (lua_isboolean(g_lua, -1)) enabled = lua_toboolean(g_lua, -1);
+  lua_pop(g_lua, 1);
+  return enabled;
+}
+
 static uint8_t *boot_pcm = NULL;
 static uint32_t boot_len = 0, boot_rate = 0;
 static bool     boot_loaded = false;
@@ -177,6 +194,10 @@ static bool     boot_loaded = false;
 // Грузит и парсит звук запуска В ПАМЯТЬ (без старта). Вызывать ОДИН раз до цикла.
 void api_preload_boot_sound(void) {
 #if BOOT_SOUND_ENABLED
+  if (!boot_sound_cfg_enabled()) {
+    printf("[sysgui] api_preload_boot_sound: отключён в bootvid.lua (BOOT_SOUND_ENABLED=false)\n");
+    return;  // boot_loaded остаётся false -> api_try_boot_sound тоже ничего не сыграет
+  }
   uint32_t size = 0;
   printf("[sysgui] api_preload_boot_sound: loading '%s'\n", BOOT_SOUND_PATH);
   uint64_t addr = _syscall(2, (uint64_t)BOOT_SOUND_PATH, (uint64_t)&size, 0, 0, 0);
@@ -596,6 +617,7 @@ static void register_key_constants(lua_State *L) {
 }
 
 void register_gui_api(lua_State *L) {
+  g_lua = L;  // запоминаем, чтобы потом читать настройки из bootvid.lua
   register_key_constants(L);
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
