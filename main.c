@@ -17,6 +17,8 @@ uint32_t *draw_target = NULL;
 uint32_t screen_w = 1024;
 uint32_t screen_h = 768;
 extern void api_tick_audio(void);
+extern void api_preload_boot_sound(void);
+extern void api_try_boot_sound(void);
 int k_app_win_x = 100;
 int k_app_win_y = 100;
 int k_app_win_w = 640;
@@ -256,6 +258,15 @@ int main(int argc, char **argv) {
 
   register_gui_api(L);
 
+  // Останавливаем сборщик мусора на время загрузки всех скриптов (init.lua
+  // через dofile тянет ещё 7 модулей). При загрузке создаётся МНОГО мелких
+  // объектов (строки токенов, прототипы функций), и инкрементальный GC по
+  // умолчанию гоняет проходы кучи прямо во время парсинга -> заметные паузы.
+  // Выключаем GC, грузим всё, затем один раз собираем мусор и включаем обратно.
+  printf("[GUI T=%u] lua load begin (GC stopped)\n",
+         (unsigned)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0));
+  lua_gc(L, LUA_GCSTOP, 0);
+
   // === ДЕБАГГЕР: Ловим ошибки синтаксиса при загрузке (КРАСНЫЙ ЭКРАН) ===
   if (luaL_dofile(L, "res/sysgui/init.lua")) {
     const char *err_msg = lua_tostring(L, -1);
@@ -278,6 +289,12 @@ int main(int argc, char **argv) {
     }
   }
 
+  // Загрузка завершена: один полный сбор мусора и возвращаем GC в работу.
+  lua_gc(L, LUA_GCCOLLECT, 0);
+  lua_gc(L, LUA_GCRESTART, 0);
+  printf("[GUI T=%u] lua load end (GC restarted)\n",
+         (unsigned)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0));
+
   const uint32_t TICK_MS = 1;
   const uint32_t TARGET_FRAME_MS = 16;
   int last_mx = -9999, last_my = -9999;
@@ -285,6 +302,12 @@ int main(int argc, char **argv) {
   uint16_t last_key = 0;
   uint32_t force_frames = 4;
   uint32_t high_resp_frames = 0; // <--- Счетчик кадров повышенной отзывчивости
+
+  // Грузим звук запуска ДО главного цикла: чтение WAV по ATA-PIO блокирующее,
+  // но здесь ещё не было ни одного present, поэтому продолжает крутиться
+  // kernel-сплэш (анимация не замирает на блокирующих сисколлах). Сам запуск
+  // воспроизведения произойдёт в цикле, когда инициализируется AC'97.
+  api_preload_boot_sound();
 
   uint32_t last_tick = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
   uint32_t frame_start = last_tick;
@@ -439,6 +462,7 @@ int main(int argc, char **argv) {
     frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
     api_tick_audio();
+    api_try_boot_sound(); // однократно запустит звук запуска, когда карта готова
   }
 
   lua_close(L);

@@ -45,6 +45,10 @@ static uint32_t wav_pcm_size = 0;
 static uint32_t wav_pcm_pos = 0;
 static bool wav_playing = false;
 
+// Указатель на главный lua_State (ставится в register_gui_api). Нужен, чтобы C
+// мог прочитать пользовательские настройки из boot-конфига (bootvid.lua).
+static lua_State *g_lua = NULL;
+
 void api_tick_audio(void) {
   if (!wav_playing || !wav_pcm_data) return;
 
@@ -69,34 +73,19 @@ void api_tick_audio(void) {
   }
 }
 
-static int l_play_sound(lua_State *L) {
-  const char *filename = luaL_checkstring(L, 1);
-  uint32_t size = 0;
-  
-  printf("[sysgui] l_play_sound: Request to play '%s'\n", filename);
-  
-  uint64_t addr = _syscall(2, (uint64_t)filename, (uint64_t)&size, 0, 0, 0);
-  if (!addr) {
-    printf("[sysgui] l_play_sound: ERROR - File not found or read failed (addr is NULL)\n");
-    lua_pushboolean(L, false);
-    return 1;
-  }
-
-  printf("[sysgui] l_play_sound: File successfully loaded. Addr: 0x%x, Size: %d bytes\n", addr, size);
-
+// Парсит уже загруженный в память WAV (RIFF/WAVE PCM). НЕ трогает AC'97 и не
+// запускает воспроизведение — только находит data-чанк и частоту. Возвращает
+// true и заполняет out_pcm/out_len/out_rate при успехе.
+static bool parse_wav(uint8_t *file_data, uint32_t size,
+                      uint8_t **out_pcm, uint32_t *out_len, uint32_t *out_rate) {
   if (size < 44) {
-    printf("[sysgui] l_play_sound: ERROR - File too small (%d bytes)\n", size);
-    lua_pushboolean(L, false);
-    return 1;
+    printf("[sysgui] parse_wav: ERROR - File too small (%d bytes)\n", size);
+    return false;
   }
-
-  uint8_t *file_data = (uint8_t *)addr;
-  
   if (memcmp(file_data, "RIFF", 4) != 0 || memcmp(file_data + 8, "WAVE", 4) != 0) {
-    printf("[sysgui] l_play_sound: ERROR - Invalid RIFF/WAVE header! Magic: %.4s, Format: %.4s\n", 
+    printf("[sysgui] parse_wav: ERROR - Invalid RIFF/WAVE header! Magic: %.4s, Format: %.4s\n",
            file_data, file_data + 8);
-    lua_pushboolean(L, false);
-    return 1;
+    return false;
   }
 
   FmtChunk_t fmt;
@@ -110,37 +99,130 @@ static int l_play_sound(lua_State *L) {
     if (memcmp(ch->id, "fmt ", 4) == 0) {
       memcpy(&fmt, file_data + offset + 8, 16);
       found_fmt = true;
-      printf("[sysgui] l_play_sound: Found 'fmt ' chunk. Rate: %d Hz, Ch: %d, BPS: %d\n", 
+      printf("[sysgui] parse_wav: Found 'fmt ' chunk. Rate: %d Hz, Ch: %d, BPS: %d\n",
              fmt.rate, fmt.ch, fmt.bps);
     } else if (memcmp(ch->id, "data", 4) == 0) {
       audio_len = ch->size;
       audio_ptr = file_data + offset + 8;
-      printf("[sysgui] l_play_sound: Found 'data' chunk. Size: %d bytes\n", audio_len);
+      printf("[sysgui] parse_wav: Found 'data' chunk. Size: %d bytes\n", audio_len);
       break;
     }
-    
     uint32_t next_offset = offset + 8 + ch->size;
-    if (next_offset <= offset || next_offset >= size) {
-      break;
-    }
+    if (next_offset <= offset || next_offset >= size) break;
     offset = next_offset;
   }
 
   if (audio_ptr && audio_len > 0 && found_fmt) {
-    _syscall(21, fmt.rate, 0, 0, 0, 0);
-    printf("[sysgui] l_play_sound: AC97 rate configured to %d Hz. Playback starting...\n", fmt.rate);
-
-    wav_pcm_data = audio_ptr; 
-    wav_pcm_size = audio_len;
-    wav_pcm_pos = 0;
-    wav_playing = true;
-    lua_pushboolean(L, true);
-  } else {
-    printf("[sysgui] l_play_sound: ERROR - Failed to parse. data_found=%s, fmt_found=%s\n", 
-           audio_ptr ? "true" : "false", found_fmt ? "true" : "false");
-    lua_pushboolean(L, false);
+    *out_pcm = audio_ptr;
+    *out_len = audio_len;
+    *out_rate = fmt.rate;
+    return true;
   }
+  printf("[sysgui] parse_wav: ERROR - Failed to parse. data_found=%s, fmt_found=%s\n",
+         audio_ptr ? "true" : "false", found_fmt ? "true" : "false");
+  return false;
+}
+
+// Немедленно начинает воспроизведение: настраивает AC'97 на нужную частоту и
+// взводит wav_playing (далее буферы докармливает api_tick_audio()).
+static void start_playback(uint8_t *pcm, uint32_t len, uint32_t rate) {
+  _syscall(21, rate, 0, 0, 0, 0);
+  printf("[sysgui] start_playback: AC97 rate %d Hz, %d bytes. Playback starting...\n", rate, len);
+  wav_pcm_data = pcm;
+  wav_pcm_size = len;
+  wav_pcm_pos  = 0;
+  wav_playing  = true;
+}
+
+// Загружает WAV с диска (syscall 2 — БЛОКИРУЮЩЕЕ чтение по ATA-PIO), парсит и
+// сразу запускает воспроизведение. Используется Lua-функцией playSound.
+static bool play_wav_file(const char *filename) {
+  uint32_t size = 0;
+  printf("[sysgui] play_wav_file: Request to play '%s'\n", filename);
+  uint64_t addr = _syscall(2, (uint64_t)filename, (uint64_t)&size, 0, 0, 0);
+  if (!addr) {
+    printf("[sysgui] play_wav_file: ERROR - File not found or read failed (addr is NULL)\n");
+    return false;
+  }
+  uint8_t *pcm; uint32_t len, rate;
+  if (!parse_wav((uint8_t *)addr, size, &pcm, &len, &rate)) return false;
+  start_playback(pcm, len, rate);
+  return true;
+}
+
+static int l_play_sound(lua_State *L) {
+  const char *filename = luaL_checkstring(L, 1);
+  lua_pushboolean(L, play_wav_file(filename));
   return 1;
+}
+
+// === ЗВУК ЗАПУСКА ОС ===
+// При быстрой загрузке звуковая карта (AC'97) инициализируется в ФОНОВОМ потоке
+// ПОСЛЕ старта рабочего стола, поэтому к моменту короткого сплэша она ещё не
+// готова. Чтение же 846/423КБ WAV с диска по ATA-PIO на whpx ОЧЕНЬ медленное
+// (каждый опрос порта = VM-exit), и если делать его в главном цикле отрисовки —
+// рабочий стол замирает на ~10 c (чёрный экран).
+//
+// Решение: ФАЙЛ ГРУЗИМ ОДИН РАЗ ЗАРАНЕЕ — api_preload_boot_sound() вызывается ДО
+// главного цикла, пока ещё крутится kernel-сплэш (анимация не замирает на
+// блокирующих сисколлах). А запуск воспроизведения (дёшево, без чтения диска)
+// откладываем до готовности AC'97 — api_try_boot_sound() в главном цикле.
+#ifndef BOOT_SOUND_ENABLED
+#define BOOT_SOUND_ENABLED 1
+#endif
+#define BOOT_SOUND_PATH "res/sysgui/BOOTSOUND.wav"
+
+static int audio_is_ready(void) { return (int)_syscall(22, 0, 0, 0, 0, 0); }
+
+// Пользовательская настройка из boot-конфига (bootvid.lua): глобальная
+// переменная BOOT_SOUND_ENABLED. true/не задана = звук играть, false = молча
+// пропустить. Это единственный переключатель, которым пользователь выключает
+// музыку при старте системы (компиляция от него не зависит).
+static bool boot_sound_cfg_enabled(void) {
+  if (!g_lua) return true;  // нет lua — поведение по умолчанию: звук включён
+  lua_getglobal(g_lua, "BOOT_SOUND_ENABLED");
+  bool enabled = true;      // если переменная не задана (nil) — считаем включённым
+  if (lua_isboolean(g_lua, -1)) enabled = lua_toboolean(g_lua, -1);
+  lua_pop(g_lua, 1);
+  return enabled;
+}
+
+static uint8_t *boot_pcm = NULL;
+static uint32_t boot_len = 0, boot_rate = 0;
+static bool     boot_loaded = false;
+
+// Грузит и парсит звук запуска В ПАМЯТЬ (без старта). Вызывать ОДИН раз до цикла.
+void api_preload_boot_sound(void) {
+#if BOOT_SOUND_ENABLED
+  if (!boot_sound_cfg_enabled()) {
+    printf("[sysgui] api_preload_boot_sound: отключён в bootvid.lua (BOOT_SOUND_ENABLED=false)\n");
+    return;  // boot_loaded остаётся false -> api_try_boot_sound тоже ничего не сыграет
+  }
+  uint32_t size = 0;
+  printf("[sysgui] api_preload_boot_sound: loading '%s'\n", BOOT_SOUND_PATH);
+  uint64_t addr = _syscall(2, (uint64_t)BOOT_SOUND_PATH, (uint64_t)&size, 0, 0, 0);
+  if (!addr) {
+    printf("[sysgui] api_preload_boot_sound: ERROR - File not found (addr is NULL)\n");
+    return;
+  }
+  if (parse_wav((uint8_t *)addr, size, &boot_pcm, &boot_len, &boot_rate)) {
+    boot_loaded = true;
+    printf("[sysgui] api_preload_boot_sound: ready (%d bytes @ %d Hz)\n", boot_len, boot_rate);
+  }
+#endif
+}
+
+// Запускает заранее загруженный звук запуска ОДИН раз, как только готов AC'97.
+// Дёшево: никакого чтения диска здесь нет.
+void api_try_boot_sound(void) {
+#if BOOT_SOUND_ENABLED
+  static bool s_done = false;
+  if (s_done || !boot_loaded) return;
+  if (wav_playing) return;        // что-то уже играет — не перебиваем
+  if (!audio_is_ready()) return;  // ждём инициализации AC'97 (фоновый hw_init)
+  start_playback(boot_pcm, boot_len, boot_rate);
+  s_done = true;
+#endif
 }
 
 
@@ -535,6 +617,7 @@ static void register_key_constants(lua_State *L) {
 }
 
 void register_gui_api(lua_State *L) {
+  g_lua = L;  // запоминаем, чтобы потом читать настройки из bootvid.lua
   register_key_constants(L);
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
