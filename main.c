@@ -327,7 +327,66 @@ int main(int argc, char **argv) {
     // форсируем полный перерисов рабочего стола.
     if (fg != 0) {
       last_fg = fg;
-      sys_sleep(TARGET_FRAME_MS);
+
+      /* SDL-приложение рисует в VRAM напрямую через sys_draw_app_buffer.
+       * enGUI при этом не трогает экран — но курсор тоже никто не рисует.
+       * Рисуем курсор поверх VRAM с сохранением пикселей под ним, чтобы
+       * не оставался шлейф при движении. */
+      {
+        uint64_t cmx = 0, cmy = 0;
+        __asm__ volatile("mov $7, %%rax\n int $0x80"
+                         : "=a"(cmx), "=b"(cmy)
+                         :
+                         : "rcx", "rdx", "rsi", "rdi", "r8", "memory");
+
+        /* Буфер для сохранения пикселей под курсором (8x8 пикселей) */
+        static uint32_t cursor_save[8 * 8];
+        static int cursor_last_x = -1, cursor_last_y = -1;
+        static bool cursor_saved = false;
+        int cx = (int)cmx, cy = (int)cmy;
+
+        if (cx != cursor_last_x || cy != cursor_last_y) {
+          /* 1. Восстанавливаем пиксели под старым положением курсора */
+          if (cursor_saved && cursor_last_x >= 0 && cursor_last_y >= 0) {
+            for (int i = 0; i < 8; i++) {
+              int py = cursor_last_y + i;
+              if (py < 0 || py >= (int)screen_h) continue;
+              for (int j = 0; j < 8; j++) {
+                int px = cursor_last_x + j;
+                if (px < 0 || px >= (int)screen_w) continue;
+                vram[py * screen_w + px] = cursor_save[i * 8 + j];
+              }
+            }
+          }
+
+          /* 2. Сохраняем пиксели под новым положением курсора */
+          for (int i = 0; i < 8; i++) {
+            int py = cy + i;
+            for (int j = 0; j < 8; j++) {
+              int px = cx + j;
+              if (py >= 0 && py < (int)screen_h && px >= 0 && px < (int)screen_w) {
+                cursor_save[i * 8 + j] = vram[py * screen_w + px];
+              } else {
+                cursor_save[i * 8 + j] = 0;
+              }
+            }
+          }
+          cursor_saved = true;
+
+          /* 3. Рисуем курсор прямо в vram */
+          draw_cursor_user(vram, cx, cy, screen_w, screen_h);
+          cursor_last_x = cx;
+          cursor_last_y = cy;
+        }
+      }
+
+      /* Минимальный сон 1ms вместо 16ms — не блокируем шедулер.
+       * Если enGUI и SDL оба делают sys_sleep(16) одновременно,
+       * шедулер застревает в цикле поиска активной задачи пока
+       * PIT не обновит tick — но PIT заблокирован в ISR → deadlock.
+       * sys_sleep(1) гарантирует что enGUI проснётся через следующий
+       * тик и шедулер найдёт хотя бы одну готовую задачу. */
+      sys_sleep(1);
       frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
       continue;
     }
