@@ -17,12 +17,93 @@ extern eid_ctx_t eid_ctx;
 extern int k_app_win_x, k_app_win_y, k_app_win_w, k_app_win_h;
 extern bool k_app_win_active;
 
-
 extern void sysgui_mark_dirty(int x, int y, int w, int h);
 
 #define MAX_ANIMS 32
 static eid_anim_t anims[MAX_ANIMS];
 static int anim_count = 0;
+
+// --- ПЕРЕМЕННЫЕ ДЛЯ БЫСТРОГО АКРИЛОВОГО БЛЮРА ---
+static uint32_t *blur_temp1 = NULL;
+static uint32_t *blur_temp2 = NULL;
+static int blur_temp_cap = 0;
+
+static void ensure_blur_temp(int size) {
+    if (size > blur_temp_cap) {
+        if (blur_temp1) free(blur_temp1);
+        if (blur_temp2) free(blur_temp2);
+        blur_temp1 = malloc(size * sizeof(uint32_t));
+        blur_temp2 = malloc(size * sizeof(uint32_t));
+        blur_temp_cap = size;
+    }
+}
+
+// Быстрый одномерный горизонтальный Box Blur с алгоритмом скользящего окна O(1)
+static void box_blur_h(uint32_t *src, uint32_t *dst, int w, int h, int r) {
+    int div = 2 * r + 1;
+    for (int y = 0; y < h; y++) {
+        uint32_t *src_row = &src[y * w];
+        uint32_t *dst_row = &dst[y * w];
+        
+        int r_sum = 0, g_sum = 0, b_sum = 0;
+        
+        for (int i = -r; i <= r; i++) {
+            int col = (i < 0) ? 0 : (i >= w ? w - 1 : i);
+            uint32_t p = src_row[col];
+            r_sum += (p >> 16) & 0xFF;
+            g_sum += (p >> 8) & 0xFF;
+            b_sum += p & 0xFF;
+        }
+        
+        for (int x = 0; x < w; x++) {
+            dst_row[x] = ((r_sum / div) << 16) | ((g_sum / div) << 8) | (b_sum / div);
+            
+            int prev = x - r;
+            if (prev < 0) prev = 0;
+            int next = x + r + 1;
+            if (next >= w) next = w - 1;
+            
+            uint32_t p_prev = src_row[prev];
+            uint32_t p_next = src_row[next];
+            
+            r_sum += ((p_next >> 16) & 0xFF) - ((p_prev >> 16) & 0xFF);
+            g_sum += ((p_next >> 8) & 0xFF) - ((p_prev >> 8) & 0xFF);
+            b_sum += (p_next & 0xFF) - (p_prev & 0xFF);
+        }
+    }
+}
+
+// Быстрый одномерный вертикальный Box Blur с алгоритмом скользящего окна O(1)
+static void box_blur_v(uint32_t *src, uint32_t *dst, int w, int h, int r) {
+    int div = 2 * r + 1;
+    for (int x = 0; x < w; x++) {
+        int r_sum = 0, g_sum = 0, b_sum = 0;
+        
+        for (int i = -r; i <= r; i++) {
+            int row = (i < 0) ? 0 : (i >= h ? h - 1 : i);
+            uint32_t p = src[row * w + x];
+            r_sum += (p >> 16) & 0xFF;
+            g_sum += (p >> 8) & 0xFF;
+            b_sum += p & 0xFF;
+        }
+        
+        for (int y = 0; y < h; y++) {
+            dst[y * w + x] = ((r_sum / div) << 16) | ((g_sum / div) << 8) | (b_sum / div);
+            
+            int prev = y - r;
+            if (prev < 0) prev = 0;
+            int next = y + r + 1;
+            if (next >= h) next = h - 1;
+            
+            uint32_t p_prev = src[prev * w + x];
+            uint32_t p_next = src[next * w + x];
+            
+            r_sum += ((p_next >> 16) & 0xFF) - ((p_prev >> 16) & 0xFF);
+            g_sum += ((p_next >> 8) & 0xFF) - ((p_prev >> 8) & 0xFF);
+            b_sum += (p_next & 0xFF) - (p_prev & 0xFF);
+        }
+    }
+}
 
 #pragma pack(push, 1)
 typedef struct {
@@ -45,8 +126,6 @@ static uint32_t wav_pcm_size = 0;
 static uint32_t wav_pcm_pos = 0;
 static bool wav_playing = false;
 
-// Указатель на главный lua_State (ставится в register_gui_api). Нужен, чтобы C
-// мог прочитать пользовательские настройки из boot-конфига (bootvid.lua).
 static lua_State *g_lua = NULL;
 
 void api_tick_audio(void) {
@@ -62,8 +141,6 @@ void api_tick_audio(void) {
     wav_pcm_pos += chunk_size;
   } else {
     printf("[sysgui] api_tick_audio: Playback FINISHED successfully.\n");
-    
-    // СТОПИМ КАРТУ, чтобы в QEMU не зацикливался последний буфер!
     _syscall(20, 0, 0, 0, 0, 0);
 
     wav_playing = false;
@@ -73,9 +150,6 @@ void api_tick_audio(void) {
   }
 }
 
-// Парсит уже загруженный в память WAV (RIFF/WAVE PCM). НЕ трогает AC'97 и не
-// запускает воспроизведение — только находит data-чанк и частоту. Возвращает
-// true и заполняет out_pcm/out_len/out_rate при успехе.
 static bool parse_wav(uint8_t *file_data, uint32_t size,
                       uint8_t **out_pcm, uint32_t *out_len, uint32_t *out_rate) {
   if (size < 44) {
@@ -123,8 +197,6 @@ static bool parse_wav(uint8_t *file_data, uint32_t size,
   return false;
 }
 
-// Немедленно начинает воспроизведение: настраивает AC'97 на нужную частоту и
-// взводит wav_playing (далее буферы докармливает api_tick_audio()).
 static void start_playback(uint8_t *pcm, uint32_t len, uint32_t rate) {
   _syscall(21, rate, 0, 0, 0, 0);
   printf("[sysgui] start_playback: AC97 rate %d Hz, %d bytes. Playback starting...\n", rate, len);
@@ -134,8 +206,6 @@ static void start_playback(uint8_t *pcm, uint32_t len, uint32_t rate) {
   wav_playing  = true;
 }
 
-// Загружает WAV с диска (syscall 2 — БЛОКИРУЮЩЕЕ чтение по ATA-PIO), парсит и
-// сразу запускает воспроизведение. Используется Lua-функцией playSound.
 static bool play_wav_file(const char *filename) {
   uint32_t size = 0;
   printf("[sysgui] play_wav_file: Request to play '%s'\n", filename);
@@ -156,17 +226,6 @@ static int l_play_sound(lua_State *L) {
   return 1;
 }
 
-// === ЗВУК ЗАПУСКА ОС ===
-// При быстрой загрузке звуковая карта (AC'97) инициализируется в ФОНОВОМ потоке
-// ПОСЛЕ старта рабочего стола, поэтому к моменту короткого сплэша она ещё не
-// готова. Чтение же 846/423КБ WAV с диска по ATA-PIO на whpx ОЧЕНЬ медленное
-// (каждый опрос порта = VM-exit), и если делать его в главном цикле отрисовки —
-// рабочий стол замирает на ~10 c (чёрный экран).
-//
-// Решение: ФАЙЛ ГРУЗИМ ОДИН РАЗ ЗАРАНЕЕ — api_preload_boot_sound() вызывается ДО
-// главного цикла, пока ещё крутится kernel-сплэш (анимация не замирает на
-// блокирующих сисколлах). А запуск воспроизведения (дёшево, без чтения диска)
-// откладываем до готовности AC'97 — api_try_boot_sound() в главном цикле.
 #ifndef BOOT_SOUND_ENABLED
 #define BOOT_SOUND_ENABLED 1
 #endif
@@ -174,14 +233,10 @@ static int l_play_sound(lua_State *L) {
 
 static int audio_is_ready(void) { return (int)_syscall(22, 0, 0, 0, 0, 0); }
 
-// Пользовательская настройка из boot-конфига (bootvid.lua): глобальная
-// переменная BOOT_SOUND_ENABLED. true/не задана = звук играть, false = молча
-// пропустить. Это единственный переключатель, которым пользователь выключает
-// музыку при старте системы (компиляция от него не зависит).
 static bool boot_sound_cfg_enabled(void) {
-  if (!g_lua) return true;  // нет lua — поведение по умолчанию: звук включён
+  if (!g_lua) return true;  
   lua_getglobal(g_lua, "BOOT_SOUND_ENABLED");
-  bool enabled = true;      // если переменная не задана (nil) — считаем включённым
+  bool enabled = true;      
   if (lua_isboolean(g_lua, -1)) enabled = lua_toboolean(g_lua, -1);
   lua_pop(g_lua, 1);
   return enabled;
@@ -191,12 +246,11 @@ static uint8_t *boot_pcm = NULL;
 static uint32_t boot_len = 0, boot_rate = 0;
 static bool     boot_loaded = false;
 
-// Грузит и парсит звук запуска В ПАМЯТЬ (без старта). Вызывать ОДИН раз до цикла.
 void api_preload_boot_sound(void) {
 #if BOOT_SOUND_ENABLED
   if (!boot_sound_cfg_enabled()) {
     printf("[sysgui] api_preload_boot_sound: отключён в bootvid.lua (BOOT_SOUND_ENABLED=false)\n");
-    return;  // boot_loaded остаётся false -> api_try_boot_sound тоже ничего не сыграет
+    return;  
   }
   uint32_t size = 0;
   printf("[sysgui] api_preload_boot_sound: loading '%s'\n", BOOT_SOUND_PATH);
@@ -212,19 +266,16 @@ void api_preload_boot_sound(void) {
 #endif
 }
 
-// Запускает заранее загруженный звук запуска ОДИН раз, как только готов AC'97.
-// Дёшево: никакого чтения диска здесь нет.
 void api_try_boot_sound(void) {
 #if BOOT_SOUND_ENABLED
   static bool s_done = false;
   if (s_done || !boot_loaded) return;
-  if (wav_playing) return;        // что-то уже играет — не перебиваем
-  if (!audio_is_ready()) return;  // ждём инициализации AC'97 (фоновый hw_init)
+  if (wav_playing) return;        
+  if (!audio_is_ready()) return;  
   start_playback(boot_pcm, boot_len, boot_rate);
   s_done = true;
 #endif
 }
-
 
 bool is_any_anim_active(void) {
   for (int i = 0; i < anim_count; i++) {
@@ -509,6 +560,7 @@ static int l_get_tasks(lua_State *L) {
     lua_pushstring(L, "brk");
     lua_pushinteger(L, (lua_Integer)info.brk);
     lua_settable(L, -3);
+    rawseti:
     lua_rawseti(L, -2, out_idx++);
   }
   return 1;
@@ -540,42 +592,155 @@ static int l_shell_exec(lua_State *L) {
   return 1;
 }
 
+// РЕВОЛЮЦИОННЫЙ ВЫСОКОПРОИЗВОДИТЕЛЬНЫЙ ACRYLIC BLUR (SSE & DOWNSAMPLING)
 static int l_draw_blur(lua_State *L) {
   int x = luaL_checkinteger(L, 1);
   int y = luaL_checkinteger(L, 2);
   int w = luaL_checkinteger(L, 3);
   int h = luaL_checkinteger(L, 4);
-  float amount = (float)luaL_checknumber(L, 5);
+  float amount = (float)luaL_checknumber(L, 5); // Интенсивность подложки (0.0 - 1.0)
 
-  for (int i = y; i < y + h; i++) {
-    for (int j = x; j < x + w; j++) {
-      if (i <= 0 || j <= 0 || (uint32_t)i >= screen_h - 1 ||
-          (uint32_t)j >= screen_w - 1)
-        continue;
+  if (w <= 0 || h <= 0) return 0;
 
-      uint32_t c1 = draw_target[i * screen_w + j];
-      uint32_t c2 = draw_target[(i + 1) * screen_w + j];
-      uint32_t c3 = draw_target[i * screen_w + (j + 1)];
-      uint32_t c4 = draw_target[(i - 1) * screen_w + j];
+  // Ограничиваем рамками экрана
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > (int)screen_w) w = (int)screen_w - x;
+  if (y + h > (int)screen_h) h = (int)screen_h - y;
+  if (w <= 4 || h <= 4) return 0;
 
-      uint8_t r = (((c1 >> 16) & 0xFF) + ((c2 >> 16) & 0xFF) +
-                   ((c3 >> 16) & 0xFF) + ((c4 >> 16) & 0xFF)) /
-                  4;
-      uint8_t g = (((c1 >> 8) & 0xFF) + ((c2 >> 8) & 0xFF) +
-                   ((c3 >> 8) & 0xFF) + ((c4 >> 8) & 0xFF)) /
-                  4;
-      uint8_t b = ((c1 & 0xFF) + (c2 & 0xFF) + (c3 & 0xFF) + (c4 & 0xFF)) / 4;
+  // Фактор даунсэмплинга = 4 (уменьшает количество обрабатываемых пикселей в 16 раз!)
+  int dw = w / 4;
+  int dh = h / 4;
+  if (dw <= 0 || dh <= 0) return 0;
 
-      r = (uint8_t)(r * amount);
-      g = (uint8_t)(g * amount);
-      b = (uint8_t)(b * amount);
+  ensure_blur_temp(dw * dh);
+  if (!blur_temp1 || !blur_temp2) return 0;
 
-      draw_target[i * screen_w + j] = (r << 16) | (g << 8) | b;
+  // 1. Быстрое сжатие картинки под окном (Downsample)
+  for (int dy = 0; dy < dh; dy++) {
+    int sy = y + dy * 4;
+    uint32_t *src_row = &draw_target[sy * screen_w];
+    uint32_t *dst_row = &blur_temp1[dy * dw];
+    for (int dx = 0; dx < dw; dx++) {
+      int sx = x + dx * 4;
+      dst_row[dx] = src_row[sx];
+    }
+  }
+
+  // 2. Сверхбыстрое размытие по горизонтали и вертикали (радиус 2 на сжатом буфере дает эффект радиуса 8)
+  box_blur_h(blur_temp1, blur_temp2, dw, dh, 2);
+  box_blur_v(blur_temp2, blur_temp1, dw, dh, 2);
+
+  // 3. Билинейный апскейл обратно на экран + тонирование Акрила (чистые целочисленные сдвиги)
+  uint32_t tint_color = 0x1A1C24; // Темно-серый оттенок Акрила
+  uint32_t alpha = (uint32_t)(amount * 255.0f);
+  uint32_t inv_alpha = 255 - alpha;
+  
+  uint32_t tr = (tint_color >> 16) & 0xFF;
+  uint32_t tg = (tint_color >> 8) & 0xFF;
+  uint32_t tb = tint_color & 0xFF;
+
+  for (int dy = 0; dy < h; dy++) {
+    int dst_y = y + dy;
+    uint32_t *dst_row = &draw_target[dst_y * screen_w];
+    
+    int y_floor = dy >> 2;
+    int y_ceil = y_floor + 1;
+    if (y_ceil >= dh) y_ceil = dh - 1;
+    int wy = (dy & 3) * 64; 
+    int inv_wy = 256 - wy;
+
+    for (int dx = 0; dx < w; dx++) {
+      int dst_x = x + dx;
+      
+      int x_floor = dx >> 2;
+      int x_ceil = x_floor + 1;
+      if (x_ceil >= dw) x_ceil = dw - 1;
+      int wx = (dx & 3) * 64;
+      int inv_wx = 256 - wx;
+
+      uint32_t p00 = blur_temp1[y_floor * dw + x_floor];
+      uint32_t p10 = blur_temp1[y_floor * dw + x_ceil];
+      uint32_t p01 = blur_temp1[y_ceil * dw + x_floor];
+      uint32_t p11 = blur_temp1[y_ceil * dw + x_ceil];
+
+      // Интерполяция весов R, G, B без плавающей точки (сдвиг 16)
+      int r_blurred = (
+        ((p00 >> 16) & 0xFF) * inv_wx * inv_wy +
+        ((p10 >> 16) & 0xFF) * wx * inv_wy +
+        ((p01 >> 16) & 0xFF) * inv_wx * wy +
+        ((p11 >> 16) & 0xFF) * wx * wy
+      ) >> 16;
+
+      int g_blurred = (
+        ((p00 >> 8) & 0xFF) * inv_wx * inv_wy +
+        ((p10 >> 8) & 0xFF) * wx * inv_wy +
+        ((p01 >> 8) & 0xFF) * inv_wx * wy +
+        ((p11 >> 8) & 0xFF) * wx * wy
+      ) >> 16;
+
+      int b_blurred = (
+        (p00 & 0xFF) * inv_wx * inv_wy +
+        (p10 & 0xFF) * wx * inv_wy +
+        (p01 & 0xFF) * inv_wx * wy +
+        (p11 & 0xFF) * wx * wy
+      ) >> 16;
+
+      // Смешивание с тонировкой (Alpha Blending)
+      uint32_t final_r = (r_blurred * inv_alpha + tr * alpha) >> 8;
+      uint32_t final_g = (g_blurred * inv_alpha + tg * alpha) >> 8;
+      uint32_t final_b = (b_blurred * inv_alpha + tb * alpha) >> 8;
+
+      dst_row[dst_x] = (final_r << 16) | (final_g << 8) | final_b;
     }
   }
 
   sysgui_mark_dirty(x, y, w, h);
+  return 0;
+}
 
+// Быстрый альфа-блендинг прямоугольника на Си (без DIV)
+static int l_draw_transparent_rect(lua_State *L) {
+  int x = luaL_checkinteger(L, 1);
+  int y = luaL_checkinteger(L, 2);
+  int w = luaL_checkinteger(L, 3);
+  int h = luaL_checkinteger(L, 4);
+  uint32_t color = (uint32_t)luaL_checknumber(L, 5);
+  float alpha_f = (float)luaL_checknumber(L, 6);
+
+  if (w <= 0 || h <= 0) return 0;
+  uint32_t alpha = (uint32_t)(alpha_f * 255.0f);
+  if (alpha == 0) return 0;
+  uint32_t inv_alpha = 255 - alpha;
+
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > (int)screen_w) w = (int)screen_w - x;
+  if (y + h > (int)screen_h) h = (int)screen_h - y;
+  if (w <= 0 || h <= 0) return 0;
+
+  uint33_t tr = (color >> 16) & 0xFF;
+  uint33_t tg = (color >> 8) & 0xFF;
+  uint33_t tb = color & 0xFF;
+
+  for (int i = y; i < y + h; i++) {
+    uint32_t *row = &draw_target[i * screen_w];
+    for (int j = x; j < x + w; j++) {
+      uint32_t bg = row[j];
+      uint8_t br = (bg >> 16) & 0xFF;
+      uint8_t bg_g = (bg >> 8) & 0xFF;
+      uint8_t bb = bg & 0xFF;
+
+      uint32_t r_out = (tr * alpha + br * inv_alpha) >> 8;
+      uint32_t g_out = (tg * alpha + bg_g * inv_alpha) >> 8;
+      uint32_t b_out = (tb * alpha + bb * inv_alpha) >> 8;
+
+      row[j] = (r_out << 16) | (g_out << 8) | b_out;
+    }
+  }
+
+  sysgui_mark_dirty(x, y, w, h);
   return 0;
 }
 
@@ -585,14 +750,12 @@ static int l_set_app_window_pos(lua_State *L) {
   int w = luaL_checkinteger(L, 3);
   int h = luaL_checkinteger(L, 4);
 
-  // 1. Обновляем копию в юзерспейсе (для copy_dirty_to_vram в main.c)
   k_app_win_x = x;
   k_app_win_y = y;
   k_app_win_w = w;
   k_app_win_h = h;
   k_app_win_active = (w > 0 && h > 0);
 
-  // 2. Отправляем сисколл в ядро (для блокировки ввода в syscall.c)
   _syscall(36, (uint64_t)x, (uint64_t)y, (uint64_t)w, (uint64_t)h, 0);
 
   return 0;
@@ -617,7 +780,7 @@ static void register_key_constants(lua_State *L) {
 }
 
 void register_gui_api(lua_State *L) {
-  g_lua = L;  // запоминаем, чтобы потом читать настройки из bootvid.lua
+  g_lua = L;  
   register_key_constants(L);
   lua_register(L, "drawText", l_draw_text);
   lua_register(L, "drawRect", l_draw_rect);
@@ -650,8 +813,7 @@ void register_gui_api(lua_State *L) {
 
   lua_register(L, "shellExec", l_shell_exec);
   lua_register(L, "drawBlur", l_draw_blur);
+  lua_register(L, "drawTransparentRect", l_draw_transparent_rect); // Зарегистрировано!
   lua_register(L, "setAppWindowPos", l_set_app_window_pos);
-  
-  // Регистрируем новую функцию в Lua
   lua_register(L, "playSound", l_play_sound);
 }
