@@ -35,27 +35,17 @@ void sysgui_init_dirty_grid(void) {
   grid_rows = (screen_h + TILE_SIZE - 1) / TILE_SIZE;
   dirty_grid = (uint8_t *)malloc(grid_cols * grid_rows);
   if (dirty_grid) {
-    memset(dirty_grid, 1, grid_cols * grid_rows); 
+    memset(dirty_grid, 1, grid_cols * grid_rows);
   }
 }
 
 void sysgui_mark_dirty(int x, int y, int w, int h) {
-  if (!dirty_grid)
-    return;
-  if (x < 0) {
-    w += x;
-    x = 0;
-  }
-  if (y < 0) {
-    h += y;
-    y = 0;
-  }
-  if (x + w > (int)screen_w)
-    w = (int)screen_w - x;
-  if (y + h > (int)screen_h)
-    h = (int)screen_h - y;
-  if (w <= 0 || h <= 0)
-    return;
+  if (!dirty_grid) return;
+  if (x < 0) { w += x; x = 0; }
+  if (y < 0) { h += y; y = 0; }
+  if (x + w > (int)screen_w) w = (int)screen_w - x;
+  if (y + h > (int)screen_h) h = (int)screen_h - y;
+  if (w <= 0 || h <= 0) return;
 
   int start_col = x / TILE_SIZE;
   int end_col = (x + w - 1) / TILE_SIZE;
@@ -106,13 +96,11 @@ static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
   for (size_t i = 0; i < remaining; i++) {
     d[i] = s[i];
   }
-
   __asm__ volatile("sfence" ::: "memory");
 }
 
 void copy_dirty_to_vram(void) {
-  if (!dirty_grid)
-    return;
+  if (!dirty_grid) return;
 
   static int g_boot_anim_signaled = 0;
   if (!g_boot_anim_signaled) {
@@ -141,29 +129,20 @@ void copy_dirty_to_vram(void) {
 
         for (int line = 0; line < TILE_SIZE; line++) {
           int pixel_y = r * TILE_SIZE + line;
-          if (pixel_y >= (int)screen_h)
-            break;
+          if (pixel_y >= (int)screen_h) break;
 
-          if (k_app_win_active && 
-              pixel_y >= k_app_win_y && pixel_y < k_app_win_y + k_app_win_h) {
-              
+          if (k_app_win_active && pixel_y >= k_app_win_y && pixel_y < k_app_win_y + k_app_win_h) {
               int left_copy_w = k_app_win_x - x;
               if (left_copy_w > width_pixels) left_copy_w = width_pixels;
-              
               if (left_copy_w > 0) {
-                  memcpy(&vram[pixel_y * screen_w + x], 
-                         &backbuffer[pixel_y * screen_w + x], 
-                         left_copy_w * 4);
+                  memcpy(&vram[pixel_y * screen_w + x], &backbuffer[pixel_y * screen_w + x], left_copy_w * 4);
               }
-              
               int right_start_x = k_app_win_x + k_app_win_w;
               int right_copy_offset = right_start_x - x;
               if (right_copy_offset < width_pixels) {
                   int right_copy_w = width_pixels - right_copy_offset;
                   if (right_copy_w > 0) {
-                      memcpy(&vram[pixel_y * screen_w + right_start_x], 
-                             &backbuffer[pixel_y * screen_w + right_start_x], 
-                             right_copy_w * 4);
+                      memcpy(&vram[pixel_y * screen_w + right_start_x], &backbuffer[pixel_y * screen_w + right_start_x], right_copy_w * 4);
                   }
               }
           } else {
@@ -190,23 +169,17 @@ void draw_cursor_user(uint32_t *fb, int x, int y, int w, int h) {
       {2, 2, 2, 2, 2, 2, 2, 0}, {0, 0, 2, 2, 2, 0, 0, 0}};
   for (int i = 0; i < 8; i++) {
     for (int j = 0; j < 8; j++) {
-      int px = x + j;
-      int py = y + i;
+      int px = x + j; int py = y + i;
       if (px >= 0 && px < w && py >= 0 && py < h) {
-        if (cursor_map[i][j] == 1)
-          fb[py * w + px] = 0xFFFFFF;
-        else if (cursor_map[i][j] == 2)
-          fb[py * w + px] = 0x000000;
+        if (cursor_map[i][j] == 1)      fb[py * w + px] = 0xFFFFFF;
+        else if (cursor_map[i][j] == 2) fb[py * w + px] = 0x000000;
       }
     }
   }
 }
 
 int main(int argc, char **argv) {
-  uint64_t phys_fb = 0;
-  uint64_t width = 0;
-  uint64_t height = 0;
-  uint64_t pitch = 0;
+  uint64_t phys_fb = 0; uint64_t width = 0; uint64_t height = 0; uint64_t pitch = 0;
 
   __asm__ volatile("mov $32, %%rax\n"
                    "int $0x80\n"
@@ -215,15 +188,12 @@ int main(int argc, char **argv) {
   screen_w = (uint32_t)width;
   screen_h = (uint32_t)height;
 
-  vram = (uint32_t *)_syscall(SYS_MAP_PHYS, phys_fb, screen_w * screen_h * 4, 0,
-                              0, 0);
-
+  vram = (uint32_t *)_syscall(30, phys_fb, screen_w * screen_h * 4, 0, 0, 0);
   backbuffer = (uint32_t *)malloc(screen_w * screen_h * 4);
   memset(backbuffer, 0, screen_w * screen_h * 4);
-
   draw_target = backbuffer;
-  sysgui_init_dirty_grid();
 
+  sysgui_init_dirty_grid();
   eid_init();
   memset(&eid_ctx, 0, sizeof(eid_ctx));
 
@@ -231,58 +201,42 @@ int main(int argc, char **argv) {
   luaL_openlibs(L);
   register_gui_api(L);
 
-  printf("[GUI T=%u] lua load begin (GC stopped)\n",
-         (unsigned)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0));
   lua_gc(L, LUA_GCSTOP, 0);
 
   if (luaL_dofile(L, "res/sysgui/init.lua")) {
     const char *err_msg = lua_tostring(L, -1);
-    printf("enGUI Lua Load Error: %s\n", err_msg);
-    for (uint32_t i = 0; i < screen_w * screen_h; i++) {
-      backbuffer[i] = 0x550000;
-    }
+    for (uint32_t i = 0; i < screen_w * screen_h; i++) backbuffer[i] = 0x550000;
     eid_draw_text(backbuffer, screen_w, screen_h, 40, 50, "enGUI LUA SYNTAX ERROR", 0xFFFFFF);
     eid_draw_text(backbuffer, screen_w, screen_h, 40, 80, err_msg, 0xFFFF00);
     sysgui_mark_all_dirty();
     copy_dirty_to_vram();
-    while (1) {
-      sys_sleep(1000);
-    }
+    while (1) sys_sleep(1000);
   }
 
   lua_gc(L, LUA_GCCOLLECT, 0);
   lua_gc(L, LUA_GCRESTART, 0);
-  printf("[GUI T=%u] lua load end (GC restarted)\n",
-         (unsigned)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0));
 
-  const uint32_t TICK_MS = 1;
-  const uint32_t TARGET_FRAME_MS = 16;
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
   uint16_t last_key = 0;
   uint32_t force_frames = 4;
-  uint32_t high_resp_frames = 0; 
+  uint32_t high_resp_frames = 0;
 
   api_preload_boot_sound();
 
-  uint32_t last_tick = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+  uint32_t last_tick = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
   uint32_t frame_start = last_tick;
   uint64_t last_fg = 0;
 
   while (1) {
-    uint64_t fg = _syscall(SYS_GET_FG_APP, 0, 0, 0, 0, 0);
-    if (fg == SYS_GET_FG_APP)
-      fg = 0;
+    uint64_t fg = _syscall(74, 0, 0, 0, 0, 0);
+    if (fg == 74) fg = 0;
 
     if (fg != 0) {
       last_fg = fg;
       {
         uint64_t cmx = 0, cmy = 0;
-        __asm__ volatile("mov $7, %%rax\n int $0x80"
-                         : "=a"(cmx), "=b"(cmy)
-                         :
-                         : "rcx", "rdx", "rsi", "rdi", "r8", "memory");
-
+        __asm__ volatile("mov $7, %%rax\n int $0x80" : "=a"(cmx), "=b"(cmy));
         static uint32_t cursor_save[8 * 8];
         static int cursor_last_x = -1, cursor_last_y = -1;
         static bool cursor_saved = false;
@@ -300,7 +254,6 @@ int main(int argc, char **argv) {
               }
             }
           }
-
           for (int i = 0; i < 8; i++) {
             int py = cy + i;
             for (int j = 0; j < 8; j++) {
@@ -313,25 +266,22 @@ int main(int argc, char **argv) {
             }
           }
           cursor_saved = true;
-
           draw_cursor_user(vram, cx, cy, screen_w, screen_h);
-          cursor_last_x = cx;
-          cursor_last_y = cy;
+          cursor_last_x = cx; cursor_last_y = cy;
         }
       }
-
       sys_sleep(1);
-      frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+      frame_start = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
       continue;
     }
+
     if (last_fg != 0) {
       force_frames = 4;
       last_fg = 0;
     }
 
     uint64_t mx = 0, my = 0, m_btn = 0;
-    __asm__ volatile("mov $7, %%rax\n int $0x80"
-                     : "=a"(mx), "=b"(my), "=c"(m_btn));
+    __asm__ volatile("mov $7, %%rax\n int $0x80" : "=a"(mx), "=b"(my), "=c"(m_btn));
     int cur_mx = (int)mx;
     int cur_my = (int)my;
     int cur_mdown = (int)((m_btn & 1) != 0);
@@ -339,26 +289,16 @@ int main(int argc, char **argv) {
     static bool pending_ext = false;
     uint16_t cur_key = 0;
     for (int i = 0; i < 8; i++) {
-      uint8_t b = (uint8_t)_syscall(SYS_GET_SCANCODE, 0, 0, 0, 0, 0);
-      if (b == 0)
-        break;
-      if (b == 0xE0) {
-        pending_ext = true;
-        continue;
-      }
-      if (pending_ext) {
-        cur_key = (uint16_t)(0x100 | b);
-        pending_ext = false;
-      } else {
-        cur_key = (uint16_t)b;
-      }
-      break; 
+      uint8_t b = (uint8_t)_syscall(9, 0, 0, 0, 0, 0);
+      if (b == 0) break;
+      if (b == 0xE0) { pending_ext = true; continue; }
+      if (pending_ext) { cur_key = (uint16_t)(0x100 | b); pending_ext = false; }
+      else { cur_key = (uint16_t)b; }
+      break;
     }
 
-    uint32_t now = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
-
-    // УДЕРЖИВАЕМ ПОЛНЫЕ 60 FPS ДАЖЕ ВО ВРЕМЯ ПРОКРУТКИ АНИМАЦИЙ!
-    if (cur_key != 0 || cur_mdown != last_mdown || is_any_anim_active()) {
+    uint32_t now = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
+    if (cur_key != 0 || cur_mdown != last_mdown) {
       high_resp_frames = 60;
     }
 
@@ -373,49 +313,34 @@ int main(int argc, char **argv) {
 
     if (need_redraw) {
       uint32_t elapsed = now - last_tick;
-      float dt = (float)(elapsed * TICK_MS);
-      if (dt > 200.0f)
-        dt = 200.0f;
+      float dt = (float)(elapsed);
+      if (dt > 200.0f) dt = 200.0f;
 
       sysgui_clear_dirty_grid();
-
-      if (force_frames > 0) {
-        sysgui_mark_all_dirty();
-      }
+      if (force_frames > 0) sysgui_mark_all_dirty();
 
       eid_begin(&eid_ctx, backbuffer, screen_w, screen_h);
-      eid_ctx.mx = cur_mx;
-      eid_ctx.my = cur_my;
-      eid_ctx.m_down = cur_mdown;
-      eid_ctx.last_key = cur_key;
+      eid_ctx.mx = cur_mx; eid_ctx.my = cur_my;
+      eid_ctx.m_down = cur_mdown; eid_ctx.last_key = cur_key;
 
       lua_getglobal(L, "on_tick");
       if (lua_isfunction(L, -1)) {
         lua_pushnumber(L, dt);
-        
         if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
           const char *err_msg = lua_tostring(L, -1);
-          printf("enGUI Lua Runtime Error: %s\n", err_msg);
-          
-          for (uint32_t i = 0; i < screen_w * screen_h; i++) {
-            backbuffer[i] = 0x000088;
-          }
-          
+          for (uint32_t i = 0; i < screen_w * screen_h; i++) backbuffer[i] = 0x000088;
           eid_draw_text(backbuffer, screen_w, screen_h, 40, 50, "enGUI LUA RUNTIME ERROR", 0xFFFFFF);
           eid_draw_text(backbuffer, screen_w, screen_h, 40, 80, err_msg, 0xFFFF00);
           sysgui_mark_all_dirty();
           copy_dirty_to_vram();
-          while (1) {
-            sys_sleep(1000);
-          }
+          while (1) sys_sleep(1000);
         }
       } else {
         lua_pop(L, 1);
       }
 
       lua_getglobal(L, "needs_redraw");
-      if (lua_toboolean(L, -1))
-        force_frames = 2; 
+      if (lua_toboolean(L, -1)) force_frames = 2;
       lua_pop(L, 1);
 
       sysgui_mark_dirty(last_mx, last_my, 8, 8);
@@ -424,38 +349,33 @@ int main(int argc, char **argv) {
       draw_cursor_user(backbuffer, cur_mx, cur_my, screen_w, screen_h);
       copy_dirty_to_vram();
 
-      last_mx = cur_mx;
-      last_my = cur_my;
-      last_mdown = cur_mdown;
-      last_key = cur_key;
-      if (force_frames > 0)
-        force_frames--; 
-
+      last_mx = cur_mx; last_my = cur_my;
+      last_mdown = cur_mdown; last_key = cur_key;
+      if (force_frames > 0) force_frames--;
       last_tick = now;
     }
 
-    uint32_t frame_end = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+    uint32_t frame_end = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
     uint32_t frame_elapsed = frame_end - frame_start;
 
     if (high_resp_frames > 0) {
       high_resp_frames--;
-      sys_yield(); 
+      sys_yield();
     } else {
-      if (frame_elapsed < TARGET_FRAME_MS) {
-        sys_sleep(TARGET_FRAME_MS - frame_elapsed);
+      if (frame_elapsed < 16) {
+        sys_sleep(16 - frame_elapsed);
       } else {
         sys_yield();
       }
     }
-    frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
+    frame_start = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
 
     api_tick_audio();
-    api_try_boot_sound(); 
+    api_try_boot_sound();
   }
 
   lua_close(L);
   free(backbuffer);
-  if (dirty_grid)
-    free(dirty_grid);
+  if (dirty_grid) free(dirty_grid);
   return 0;
 }
