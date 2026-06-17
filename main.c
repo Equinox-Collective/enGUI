@@ -25,7 +25,6 @@ int k_app_win_w = 640;
 int k_app_win_h = 400;
 bool k_app_win_active = false;
 
-// --- СИСТЕМА ДИНАМИЧЕСКИХ ГРЯЗНЫХ ТАЙЛОВ ---
 #define TILE_SIZE 32
 static uint8_t *dirty_grid = NULL;
 static int grid_cols = 0;
@@ -36,12 +35,10 @@ void sysgui_init_dirty_grid(void) {
   grid_rows = (screen_h + TILE_SIZE - 1) / TILE_SIZE;
   dirty_grid = (uint8_t *)malloc(grid_cols * grid_rows);
   if (dirty_grid) {
-    memset(dirty_grid, 1,
-           grid_cols * grid_rows); // Первый кадр полностью грязный
+    memset(dirty_grid, 1, grid_cols * grid_rows); 
   }
 }
 
-// Пометка произвольной области экрана как требующей обновления
 void sysgui_mark_dirty(int x, int y, int w, int h) {
   if (!dirty_grid)
     return;
@@ -113,23 +110,16 @@ static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
   __asm__ volatile("sfence" ::: "memory");
 }
 
-// Высокопроизводительное копирование только изменившихся участков
 void copy_dirty_to_vram(void) {
   if (!dirty_grid)
     return;
 
-  // Первый реальный present кадра GUI: просим ядро погасить boot-анимацию
-  // Nyan Cat (всё это время её крутил PIT-таймер ядра, см. src/system/misc/
-  // timer.c + src/boot/eqstart.c). Делаем это ровно здесь, чтобы между
-  // последним кадром гифки и первым кадром рабочего стола НЕ было заметной
-  // «заморозки». syscall 88 = SYS_BOOT_ANIM_DONE.
   static int g_boot_anim_signaled = 0;
   if (!g_boot_anim_signaled) {
     g_boot_anim_signaled = 1;
     _syscall(88, 0, 0, 0, 0, 0);
   }
 
-  // Получаем координаты окна запущенного приложения
   extern int k_app_win_x, k_app_win_y, k_app_win_w, k_app_win_h;
   extern bool k_app_win_active;
 
@@ -154,12 +144,9 @@ void copy_dirty_to_vram(void) {
           if (pixel_y >= (int)screen_h)
             break;
 
-          // Если строка пересекает окно Doom, копируем левую и правую части
-          // строго через стандартный безопасный memcpy (он не требует 16-байтового выравнивания)
           if (k_app_win_active && 
               pixel_y >= k_app_win_y && pixel_y < k_app_win_y + k_app_win_h) {
               
-              // Копируем часть строки слева от окна
               int left_copy_w = k_app_win_x - x;
               if (left_copy_w > width_pixels) left_copy_w = width_pixels;
               
@@ -169,7 +156,6 @@ void copy_dirty_to_vram(void) {
                          left_copy_w * 4);
               }
               
-              // Копируем часть строки справа от окна
               int right_start_x = k_app_win_x + k_app_win_w;
               int right_copy_offset = right_start_x - x;
               if (right_copy_offset < width_pixels) {
@@ -181,7 +167,6 @@ void copy_dirty_to_vram(void) {
                   }
               }
           } else {
-              // Вне окна копируем всю грязную линию целиком (здесь выравнивание по TILE_SIZE гарантировано)
               uint32_t *src = &backbuffer[pixel_y * screen_w + x];
               uint32_t *dst = &vram[pixel_y * screen_w + x];
               fast_memcpy_sse(dst, src, width_pixels * 4);
@@ -195,7 +180,6 @@ void copy_dirty_to_vram(void) {
 }
 
 eid_ctx_t eid_ctx;
-
 extern bool is_any_anim_active(void);
 
 void draw_cursor_user(uint32_t *fb, int x, int y, int w, int h) {
@@ -238,58 +222,34 @@ int main(int argc, char **argv) {
   memset(backbuffer, 0, screen_w * screen_h * 4);
 
   draw_target = backbuffer;
-
-  // Инициализация сетки грязных тайлов
   sysgui_init_dirty_grid();
 
   eid_init();
   memset(&eid_ctx, 0, sizeof(eid_ctx));
 
-  // ПРИМЕЧАНИЕ: Nyan Cat намеренно НЕ гасится здесь. Пока ниже грузятся и
-  // парсятся lua-скрипты (window/terminal/paint/... + bootvid), kernel-таймер
-  // продолжает крутить гифку прямо на фреймбуфере. Чтобы она не «замерзала» на
-  // время блокирующих сисколлов (чтения с диска / serial), ядро на время
-  // boot-анимации держит шлюз int 0x80 как trap gate — прерывания не гасятся
-  // во время сисколлов, и PIT успевает крутить кадры. Гасим анимацию только на
-  // ПЕРВОМ реальном present GUI (syscall 88 внутри copy_dirty_to_vram).
-
   lua_State *L = luaL_newstate();
   luaL_openlibs(L);
-
   register_gui_api(L);
 
-  // Останавливаем сборщик мусора на время загрузки всех скриптов (init.lua
-  // через dofile тянет ещё 7 модулей). При загрузке создаётся МНОГО мелких
-  // объектов (строки токенов, прототипы функций), и инкрементальный GC по
-  // умолчанию гоняет проходы кучи прямо во время парсинга -> заметные паузы.
-  // Выключаем GC, грузим всё, затем один раз собираем мусор и включаем обратно.
   printf("[GUI T=%u] lua load begin (GC stopped)\n",
          (unsigned)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0));
   lua_gc(L, LUA_GCSTOP, 0);
 
-  // === ДЕБАГГЕР: Ловим ошибки синтаксиса при загрузке (КРАСНЫЙ ЭКРАН) ===
   if (luaL_dofile(L, "res/sysgui/init.lua")) {
     const char *err_msg = lua_tostring(L, -1);
     printf("enGUI Lua Load Error: %s\n", err_msg);
-    
-    // Заливаем экран темно-красным
     for (uint32_t i = 0; i < screen_w * screen_h; i++) {
       backbuffer[i] = 0x550000;
     }
-    
     eid_draw_text(backbuffer, screen_w, screen_h, 40, 50, "enGUI LUA SYNTAX ERROR", 0xFFFFFF);
     eid_draw_text(backbuffer, screen_w, screen_h, 40, 80, err_msg, 0xFFFF00);
-    
     sysgui_mark_all_dirty();
     copy_dirty_to_vram();
-    
-    // Зависаем, чтобы разработчик мог прочитать лог
     while (1) {
       sys_sleep(1000);
     }
   }
 
-  // Загрузка завершена: один полный сбор мусора и возвращаем GC в работу.
   lua_gc(L, LUA_GCCOLLECT, 0);
   lua_gc(L, LUA_GCRESTART, 0);
   printf("[GUI T=%u] lua load end (GC restarted)\n",
@@ -301,12 +261,8 @@ int main(int argc, char **argv) {
   int last_mdown = -1;
   uint16_t last_key = 0;
   uint32_t force_frames = 4;
-  uint32_t high_resp_frames = 0; // <--- Счетчик кадров повышенной отзывчивости
+  uint32_t high_resp_frames = 0; 
 
-  // Грузим звук запуска ДО главного цикла: чтение WAV по ATA-PIO блокирующее,
-  // но здесь ещё не было ни одного present, поэтому продолжает крутиться
-  // kernel-сплэш (анимация не замирает на блокирующих сисколлах). Сам запуск
-  // воспроизведения произойдёт в цикле, когда инициализируется AC'97.
   api_preload_boot_sound();
 
   uint32_t last_tick = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
@@ -318,20 +274,8 @@ int main(int argc, char **argv) {
     if (fg == SYS_GET_FG_APP)
       fg = 0;
 
-    // Пока активен полноэкранный foreground-ELF (например browser.elf или
-    // doom), он рисует через SYS_DRAW_BUFFER в ту же VRAM, что и sysgui через
-    // copy_dirty_to_vram(). Без этой проверки оба процесса гонят свои кадры
-    // наперегонки — видно как сильное мерцание / затирание поверх окна
-    // приложения. Пока fg != 0, sysgui просто спит и не трогает экран. Когда
-    // foreground отпускает фокус (SYS_EXIT обнуляет fg_app_pid в ядре),
-    // форсируем полный перерисов рабочего стола.
     if (fg != 0) {
       last_fg = fg;
-
-      /* SDL-приложение рисует в VRAM напрямую через sys_draw_app_buffer.
-       * enGUI при этом не трогает экран — но курсор тоже никто не рисует.
-       * Рисуем курсор поверх VRAM с сохранением пикселей под ним, чтобы
-       * не оставался шлейф при движении. */
       {
         uint64_t cmx = 0, cmy = 0;
         __asm__ volatile("mov $7, %%rax\n int $0x80"
@@ -339,14 +283,12 @@ int main(int argc, char **argv) {
                          :
                          : "rcx", "rdx", "rsi", "rdi", "r8", "memory");
 
-        /* Буфер для сохранения пикселей под курсором (8x8 пикселей) */
         static uint32_t cursor_save[8 * 8];
         static int cursor_last_x = -1, cursor_last_y = -1;
         static bool cursor_saved = false;
         int cx = (int)cmx, cy = (int)cmy;
 
         if (cx != cursor_last_x || cy != cursor_last_y) {
-          /* 1. Восстанавливаем пиксели под старым положением курсора */
           if (cursor_saved && cursor_last_x >= 0 && cursor_last_y >= 0) {
             for (int i = 0; i < 8; i++) {
               int py = cursor_last_y + i;
@@ -359,7 +301,6 @@ int main(int argc, char **argv) {
             }
           }
 
-          /* 2. Сохраняем пиксели под новым положением курсора */
           for (int i = 0; i < 8; i++) {
             int py = cy + i;
             for (int j = 0; j < 8; j++) {
@@ -373,19 +314,12 @@ int main(int argc, char **argv) {
           }
           cursor_saved = true;
 
-          /* 3. Рисуем курсор прямо в vram */
           draw_cursor_user(vram, cx, cy, screen_w, screen_h);
           cursor_last_x = cx;
           cursor_last_y = cy;
         }
       }
 
-      /* Минимальный сон 1ms вместо 16ms — не блокируем шедулер.
-       * Если enGUI и SDL оба делают sys_sleep(16) одновременно,
-       * шедулер застревает в цикле поиска активной задачи пока
-       * PIT не обновит tick — но PIT заблокирован в ISR → deadlock.
-       * sys_sleep(1) гарантирует что enGUI проснётся через следующий
-       * тик и шедулер найдёт хотя бы одну готовую задачу. */
       sys_sleep(1);
       frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
       continue;
@@ -423,8 +357,8 @@ int main(int argc, char **argv) {
 
     uint32_t now = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
-    // Если нажата клавиша или кликнули мышкой — включаем режим отзывчивости на 60 кадров (~1 секунда)
-    if (cur_key != 0 || cur_mdown != last_mdown) {
+    // УДЕРЖИВАЕМ ПОЛНЫЕ 60 FPS ДАЖЕ ВО ВРЕМЯ ПРОКРУТКИ АНИМАЦИЙ!
+    if (cur_key != 0 || cur_mdown != last_mdown || is_any_anim_active()) {
       high_resp_frames = 60;
     }
 
@@ -459,22 +393,18 @@ int main(int argc, char **argv) {
       if (lua_isfunction(L, -1)) {
         lua_pushnumber(L, dt);
         
-        // === ДЕБАГГЕР: Ловим ошибки выполнения во время работы (СИНИЙ ЭКРАН) ===
         if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
           const char *err_msg = lua_tostring(L, -1);
           printf("enGUI Lua Runtime Error: %s\n", err_msg);
           
-          // Заливаем экран темно-синим
           for (uint32_t i = 0; i < screen_w * screen_h; i++) {
             backbuffer[i] = 0x000088;
           }
           
           eid_draw_text(backbuffer, screen_w, screen_h, 40, 50, "enGUI LUA RUNTIME ERROR", 0xFFFFFF);
           eid_draw_text(backbuffer, screen_w, screen_h, 40, 80, err_msg, 0xFFFF00);
-          
           sysgui_mark_all_dirty();
           copy_dirty_to_vram();
-          
           while (1) {
             sys_sleep(1000);
           }
@@ -485,14 +415,13 @@ int main(int argc, char **argv) {
 
       lua_getglobal(L, "needs_redraw");
       if (lua_toboolean(L, -1))
-        force_frames = 2; // <=== СТАВИМ ТУТ 2. Это разгонит цикл до 60 FPS и починит звук!
+        force_frames = 2; 
       lua_pop(L, 1);
 
       sysgui_mark_dirty(last_mx, last_my, 8, 8);
       sysgui_mark_dirty(cur_mx, cur_my, 8, 8);
 
       draw_cursor_user(backbuffer, cur_mx, cur_my, screen_w, screen_h);
-
       copy_dirty_to_vram();
 
       last_mx = cur_mx;
@@ -510,7 +439,7 @@ int main(int argc, char **argv) {
 
     if (high_resp_frames > 0) {
       high_resp_frames--;
-      sys_yield(); // Уступаем CPU вместо сна, убирая любые задержки при вводе текста
+      sys_yield(); 
     } else {
       if (frame_elapsed < TARGET_FRAME_MS) {
         sys_sleep(TARGET_FRAME_MS - frame_elapsed);
@@ -521,7 +450,7 @@ int main(int argc, char **argv) {
     frame_start = (uint32_t)_syscall(SYS_GET_TIME, 0, 0, 0, 0, 0);
 
     api_tick_audio();
-    api_try_boot_sound(); // однократно запустит звук запуска, когда карта готова
+    api_try_boot_sound(); 
   }
 
   lua_close(L);
