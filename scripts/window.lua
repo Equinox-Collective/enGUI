@@ -1,4 +1,3 @@
---- START OF FILE res/sysgui/window.lua ---
 local Window = {}
 Window.__index = Window
 
@@ -18,7 +17,7 @@ function Window.new(title, x, y, w, h, draw_cb, key_cb)
     self.fullscreen = false
     self.is_app_container = false
     self.minimized = false
-    self.snapped = false -- false, "left", "right", "top"
+    self.snapped = false -- false, "left", "right"
 
     if type(draw_cb) == "table" then
         self.draw_cb = draw_cb.draw
@@ -69,40 +68,57 @@ function Window:draw(mx, my, mdown, dt)
     if not self.borderless then
         local ty = win_y - 28
         
-        -- Software Drop Shadow Simulation
-        drawRect(win_x - 4, ty - 4, win_w + 8, win_h + 36, 0x050608)
-        drawRect(win_x - 2, ty - 2, win_w + 4, win_h + 32, 0x0E0F12)
+        -- 1. Высококачественная мягкая многослойная тень (Liquid Glass Shadows)
+        if type(drawTransparentRect) == "function" then
+            drawTransparentRect(win_x - 6, ty - 6, win_w + 12, win_h + 38, 0x000000, 0.12)
+            drawTransparentRect(win_x - 3, ty - 3, win_w + 6, win_h + 32, 0x000000, 0.22)
+        else
+            drawRect(win_x - 2, ty - 2, win_w + 4, win_h + 32, 0x0E0F12)
+        end
 
-        -- Border & Selection Highlights
-        local border_color = active and 0x0078D7 or 0x3E4452
-        drawRect(win_x - 1, ty - 1, win_w + 2, win_h + 30, border_color)
+        -- 2. Светящаяся стеклянная окантовка (Glow Outline)
+        local outline_color = active and 0x51AFEF or 0x4B5263
+        local outline_opacity = active and 0.55 or 0.25
+        if type(drawTransparentRect) == "function" then
+            drawTransparentRect(win_x - 1, ty - 1, win_w + 2, win_h + 30, outline_color, outline_opacity)
+        else
+            drawRect(win_x - 1, ty - 1, win_w + 2, win_h + 30, outline_color)
+        end
 
-        -- Acrylic Style Title bar
+        -- 3. Акриловое размытие заголовка (Frosted Titlebar)
         if type(drawBlur) == "function" then
-            drawBlur(win_x, ty, win_w, 28, active and 0.50 or 0.40)
+            drawBlur(win_x, ty, win_w, 28, active and 0.45 or 0.30)
+            -- Накладываем стеклянный глянец
+            if type(drawTransparentRect) == "function" then
+                drawTransparentRect(win_x, ty, win_w, 28, 0x1E222B, 0.40)
+                -- Тонкий блик сверху заголовка
+                drawTransparentRect(win_x, ty, win_w, 1, 0xFFFFFF, active and 0.25 or 0.10)
+            end
         else
             drawRect(win_x, ty, win_w, 28, active and 0x21252B or 0x1E2227)
         end
 
-        -- Active light-bar accent on title top
-        if active then
-            drawRect(win_x, ty, win_w, 1, 0x0078D7)
+        -- Тонкая линия-акцент под заголовком
+        if type(drawTransparentRect) == "function" then
+            drawTransparentRect(win_x, win_y - 1, win_w, 1, active and 0x51AFEF or 0x3E4452, 0.35)
+        else
+            drawRect(win_x, win_y - 1, win_w, 1, active and 0x0078D7 or 0x3E4452)
         end
 
-        -- Window title text
+        -- Заголовок окна
         drawText(self.title, win_x + 10, ty + 8, active and 0xFFFFFF or 0xABB2BF)
 
-        -- Action buttons: Minimize [ - ], Maximize [ [] ], Close [ X ]
+        -- Кнопки управления (Минимизировать, Развернуть, Закрыть)
         local bx = win_x + win_w - 76
         
-        -- Minimize Button
+        -- Стеклянная кнопка Свернуть [ - ]
         if button("_", bx, ty + 4, 20, 20) then
             self.minimized = true
             _G.needs_redraw = true
             return
         end
         
-        -- Maximize/Restore Button
+        -- Стеклянная кнопка Развернуть [ O ]
         if button("O", bx + 24, ty + 4, 20, 20) then
             if self.fullscreen or self.snapped then
                 self.fullscreen = false
@@ -115,17 +131,20 @@ function Window:draw(mx, my, mdown, dt)
             _G.needs_redraw = true
         end
 
-        -- Close Button
+        -- Стеклянная кнопка Закрыть [ X ] (Подсвечивается красным при наведении)
+        local close_hover = (mx >= bx + 48 and mx < bx + 68 and my >= ty + 4 and my < ty + 24)
+        if close_hover and type(drawTransparentRect) == "function" then
+            drawTransparentRect(bx + 48, ty + 4, 20, 20, 0xE06C75, 0.40)
+        end
+        
         if button("X", bx + 48, ty + 4, 20, 20) then
             self.active = false
             _G.needs_redraw = true
 
-            -- Если это контейнер внешнего приложения — завершаем процесс игры
             if self.is_app_container then
                 if type(getTasks) == "function" and type(killTask) == "function" then
                     local tasks = getTasks()
                     for _, t in ipairs(tasks) do
-                        -- Безопасно убиваем только сторонние процессы, пропуская системные (1, 2, 3)
                         if t.pid ~= 1 and t.pid ~= 2 and t.pid ~= 3 then
                             killTask(t.pid)
                         end
@@ -134,15 +153,17 @@ function Window:draw(mx, my, mdown, dt)
             end
             return
         end
-
-        drawRect(win_x, win_y - 1, win_w, 1, active and 0x0078D7 or 0x3E4452)
     end
 
-    -- Window Body
+    -- Тело окна (Window Body)
     if not self.is_app_container then
         if not self.borderless then
+            -- Глубокое акриловое стекло тела окна
             if type(drawBlur) == "function" then
-                drawBlur(win_x, win_y, win_w, win_h, 0.70)
+                drawBlur(win_x, win_y, win_w, win_h, 0.55)
+                if type(drawTransparentRect) == "function" then
+                    drawTransparentRect(win_x, win_y, win_w, win_h, 0x1A1C24, 0.50)
+                end
             else
                 drawRect(win_x, win_y, win_w, win_h, 0x1E1E24)
             end
@@ -167,10 +188,14 @@ function Window:draw(mx, my, mdown, dt)
         end
     end
 
-    -- Resize Handle (Visible when fully opened)
+    -- Ручка изменения размера окна (Resize Handle)
     if not self.borderless and not self.fullscreen and not self.snapped and scale >= 0.95 then
         local rx, ry = win_x + win_w - 10, win_y + win_h - 10
-        drawRect(rx, ry, 10, 10, active and 0x0078D7 or 0x4E5666)
+        if type(drawTransparentRect) == "function" then
+            drawTransparentRect(rx, ry, 10, 10, active and 0x51AFEF or 0x4B5263, 0.6)
+        else
+            drawRect(rx, ry, 10, 10, active and 0x0078D7 or 0x4E5666)
+        end
         if mdown and not last_mdown and mx >= rx and mx < rx+10 and my >= ry and my < ry+10 then
             resizing_win = self
         end
@@ -184,4 +209,3 @@ function Window:handle_key(key, char)
 end
 
 return Window
---- END OF FILE res/sysgui/window.lua ---
