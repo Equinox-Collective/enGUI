@@ -14,8 +14,8 @@
 uint32_t *vram = NULL;
 uint32_t *backbuffer = NULL;
 uint32_t *draw_target = NULL;
-uint32_t screen_w = 1024;
-uint32_t screen_h = 768;
+uint32_t screen_w = 1920;
+uint32_t screen_h = 1080;
 extern void api_tick_audio(void);
 extern void api_preload_boot_sound(void);
 extern void api_try_boot_sound(void);
@@ -71,32 +71,40 @@ void sysgui_clear_dirty_grid(void) {
   }
 }
 
+// Высокопроизводительное SSE копирование с защитой от General Protection Fault (#GP) на невыровненных адресах
 static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
-  size_t blocks = bytes / 64;
-  uint8_t *d = (uint8_t *)dest;
-  const uint8_t *s = (const uint8_t *)src;
+  // Убеждаемся, что адрес выровнен по границе 16 байт
+  if (((uintptr_t)dest & 15) == 0 && ((uintptr_t)src & 15) == 0 && (bytes % 16) == 0) {
+    size_t blocks = bytes / 64;
+    uint8_t *d = (uint8_t *)dest;
+    const uint8_t *s = (const uint8_t *)src;
 
-  for (size_t i = 0; i < blocks; i++) {
-    __asm__ volatile("movups 0(%0), %%xmm0\n"
-                     "movups 16(%0), %%xmm1\n"
-                     "movups 32(%0), %%xmm2\n"
-                     "movups 48(%0), %%xmm3\n"
-                     "movntdq %%xmm0, 0(%1)\n"
-                     "movntdq %%xmm1, 16(%1)\n"
-                     "movntdq %%xmm2, 32(%1)\n"
-                     "movntdq %%xmm3, 48(%1)\n"
-                     :
-                     : "r"(s), "r"(d)
-                     : "xmm0", "xmm1", "xmm2", "xmm3", "memory");
-    s += 64;
-    d += 64;
-  }
+    for (size_t i = 0; i < blocks; i++) {
+      __asm__ volatile("movups 0(%0), %%xmm0\n"
+                       "movups 16(%0), %%xmm1\n"
+                       "movups 32(%0), %%xmm2\n"
+                       "movups 48(%0), %%xmm3\n"
+                       "movntdq %%xmm0, 0(%1)\n"
+                       "movntdq %%xmm1, 16(%1)\n"
+                       "movntdq %%xmm2, 32(%1)\n"
+                       "movntdq %%xmm3, 48(%1)\n"
+                       :
+                       : "r"(s), "r"(d)
+                       : "xmm0", "xmm1", "xmm2", "xmm3", "memory");
+      s += 64;
+      d += 64;
+    }
 
-  size_t remaining = bytes % 64;
-  for (size_t i = 0; i < remaining; i++) {
-    d[i] = s[i];
+    size_t remaining = bytes % 64;
+    for (size_t i = 0; i < remaining; i++) {
+      d[i] = s[i];
+    }
+    __asm__ volatile("sfence" ::: "memory");
+  } else {
+    // Безопасный стандартный fallback
+    memcpy(dest, src, bytes);
+    __asm__ volatile("sfence" ::: "memory");
   }
-  __asm__ volatile("sfence" ::: "memory");
 }
 
 void copy_dirty_to_vram(void) {
@@ -220,7 +228,6 @@ int main(int argc, char **argv) {
   int last_mdown = -1;
   uint16_t last_key = 0;
   uint32_t force_frames = 4;
-  uint32_t high_resp_frames = 0;
 
   api_preload_boot_sound();
 
@@ -298,9 +305,6 @@ int main(int argc, char **argv) {
     }
 
     uint32_t now = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
-    if (cur_key != 0 || cur_mdown != last_mdown) {
-      high_resp_frames = 60;
-    }
 
     int need_redraw = (force_frames > 0) || 
                       (cur_mx != last_mx) || 
@@ -358,15 +362,11 @@ int main(int argc, char **argv) {
     uint32_t frame_end = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
     uint32_t frame_elapsed = frame_end - frame_start;
 
-    if (high_resp_frames > 0) {
-      high_resp_frames--;
-      sys_yield();
+    // Стабильный фрейм-лимитер до 60 FPS: предотвращает скачки до 100% CPU и микро-фризы
+    if (frame_elapsed < 16) {
+      sys_sleep(16 - frame_elapsed);
     } else {
-      if (frame_elapsed < 16) {
-        sys_sleep(16 - frame_elapsed);
-      } else {
-        sys_yield();
-      }
+      sys_yield();
     }
     frame_start = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
 
