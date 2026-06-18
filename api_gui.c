@@ -533,13 +533,13 @@ static inline bool is_pixel_on_border(int tx, int ty, int w, int h, int r, int b
     return false;
 }
 
-// --- ГЛАВНАЯ ФУНКЦИЯ ACRYLIC GLASS BLUR (SSE-даунсэмплинг и двухпроходное размытие) ---
+// --- ГЛАВНАЯ ФУНКЦИЯ ACRYLIC GLASS BLUR (Высокооптимизированный целочисленный fixed-point даунсэмплинг и быстрый скользящий бокс-фильтр) ---
 static int l_draw_blur(lua_State *L) {
     int x = luaL_checkinteger(L, 1);
     int y = luaL_checkinteger(L, 2);
     int w = luaL_checkinteger(L, 3);
     int h = luaL_checkinteger(L, 4);
-    float amount = (float)luaL_checknumber(L, 5); // Коэффициент прозрачности стекла
+    float amount_f = (float)luaL_checknumber(L, 5); // Коэффициент прозрачности стекла (0.0 - 1.0)
     int radius = (lua_gettop(L) >= 6) ? luaL_checkinteger(L, 6) : 12; // Радиус скругления
     uint32_t tint_rgb = (lua_gettop(L) >= 7) ? (uint32_t)luaL_checknumber(L, 7) : 0x1F222B; // Тинт стекла
 
@@ -548,70 +548,121 @@ static int l_draw_blur(lua_State *L) {
     int dsW = w / 4;
     int dsH = h / 4;
     ensure_scratch_buffers(dsW, dsH);
+    if (!scratch_buf_1 || !scratch_buf_2) return 0;
 
-    // 1. Быстрый даунсэмплинг (захват фона под окном)
+    // 1. Клиппированный безопасный даунсэмплинг (препятствует крашам памяти при перетаскивании за границы экрана)
     for (int dy = 0; dy < dsH; dy++) {
         int src_y = y + (dy * 4);
+        if (src_y < 0) src_y = 0;
         if (src_y >= (int)screen_h) src_y = screen_h - 1;
+        
         uint32_t *src_row = &draw_target[src_y * screen_w];
         uint32_t *dst_row = &scratch_buf_1[dy * dsW];
+        
         for (int dx = 0; dx < dsW; dx++) {
             int src_x = x + (dx * 4);
+            if (src_x < 0) src_x = 0;
             if (src_x >= (int)screen_w) src_x = screen_w - 1;
             dst_row[dx] = src_row[src_x];
         }
     }
 
-    // 2. Двухпроходное размытие боксом (Box Blur r=2 на уменьшенной картинке дает глубокий фокус)
+    // 2. Сверхбыстрое размытие по методу скользящего окна (Sliding Window Box Blur) за O(1) от радиуса
     int r_blur = 2;
-    // Горизонтальный проход
+    int window_size = r_blur * 2 + 1; // 5
+
+    // Горизонтальный скользящий проход
     for (int dy = 0; dy < dsH; dy++) {
         uint32_t *row_src = &scratch_buf_1[dy * dsW];
         uint32_t *row_dst = &scratch_buf_2[dy * dsW];
-        for (int dx = 0; dx < dsW; dx++) {
-            int sum_r = 0, sum_g = 0, sum_b = 0, count = 0;
-            for (int k = -r_blur; k <= r_blur; k++) {
-                int px = dx + k;
-                if (px >= 0 && px < dsW) {
-                    uint32_t color = row_src[px];
-                    sum_r += (color >> 16) & 0xFF;
-                    sum_g += (color >> 8) & 0xFF;
-                    sum_b += color & 0xFF;
-                    count++;
-                }
-            }
-            row_dst[dx] = ((sum_r / count) << 16) | ((sum_g / count) << 8) | (sum_b / count);
+        
+        int sum_r = 0, sum_g = 0, sum_b = 0;
+        
+        // Инициализируем скользящую сумму для первого пикселя строки с зажимом границ
+        for (int k = -r_blur; k <= r_blur; k++) {
+            int px = (k < 0) ? 0 : (k >= dsW ? dsW - 1 : k);
+            uint32_t color = row_src[px];
+            sum_r += (color >> 16) & 0xFF;
+            sum_g += (color >> 8) & 0xFF;
+            sum_b += color & 0xFF;
         }
-    }
-    // Вертикальный проход
-    for (int dx = 0; dx < dsW; dx++) {
-        for (int dy = 0; dy < dsH; dy++) {
-            int sum_r = 0, sum_g = 0, sum_b = 0, count = 0;
-            for (int k = -r_blur; k <= r_blur; k++) {
-                int py = dy + k;
-                if (py >= 0 && py < dsH) {
-                    uint32_t color = scratch_buf_2[py * dsW + dx];
-                    sum_r += (color >> 16) & 0xFF;
-                    sum_g += (color >> 8) & 0xFF;
-                    sum_b += color & 0xFF;
-                    count++;
-                }
-            }
-            scratch_buf_1[dy * dsW + dx] = ((sum_r / count) << 16) | ((sum_g / count) << 8) | (sum_b / count);
+        row_dst[0] = ((sum_r / window_size) << 16) | ((sum_g / window_size) << 8) | (sum_b / window_size);
+        
+        // Сдвигаем окно по строке: убираем старый левый пиксель, добавляем новый правый
+        for (int dx = 1; dx < dsW; dx++) {
+            int prev_idx = dx - 1 - r_blur;
+            if (prev_idx < 0) prev_idx = 0;
+            uint32_t prev_color = row_src[prev_idx];
+            sum_r -= (prev_color >> 16) & 0xFF;
+            sum_g -= (prev_color >> 8) & 0xFF;
+            sum_b -= prev_color & 0xFF;
+            
+            int next_idx = dx + r_blur;
+            if (next_idx >= dsW) next_idx = dsW - 1;
+            uint32_t next_color = row_src[next_idx];
+            sum_r += (next_color >> 16) & 0xFF;
+            sum_g += (next_color >> 8) & 0xFF;
+            sum_b += next_color & 0xFF;
+            
+            row_dst[dx] = ((sum_r / window_size) << 16) | ((sum_g / window_size) << 8) | (sum_b / window_size);
         }
     }
 
-    // 3. Билинейный апсэмплинг с маской скругления углов и наложением неоновой стеклянной фаски
-    uint32_t border_color = (tint_rgb == 0x1F222B) ? 0x4A505C : 0x61AFEF; // Голубая фаска для активного, серая для неактивного
+    // Вертикальный скользящий проход
+    for (int dx = 0; dx < dsW; dx++) {
+        int sum_r = 0, sum_g = 0, sum_b = 0;
+        
+        // Инициализируем скользящую сумму по столбцу
+        for (int k = -r_blur; k <= r_blur; k++) {
+            int py = (k < 0) ? 0 : (k >= dsH ? dsH - 1 : k);
+            uint32_t color = scratch_buf_2[py * dsW + dx];
+            sum_r += (color >> 16) & 0xFF;
+            sum_g += (color >> 8) & 0xFF;
+            sum_b += color & 0xFF;
+        }
+        scratch_buf_1[0 * dsW + dx] = ((sum_r / window_size) << 16) | ((sum_g / window_size) << 8) | (sum_b / window_size);
+        
+        // Сдвигаем окно вниз
+        for (int dy = 1; dy < dsH; dy++) {
+            int prev_idx = dy - 1 - r_blur;
+            if (prev_idx < 0) prev_idx = 0;
+            uint32_t prev_color = scratch_buf_2[prev_idx * dsW + dx];
+            sum_r -= (prev_color >> 16) & 0xFF;
+            sum_g -= (prev_color >> 8) & 0xFF;
+            sum_b -= prev_color & 0xFF;
+            
+            int next_idx = dy + r_blur;
+            if (next_idx >= dsH) next_idx = dsH - 1;
+            uint32_t next_color = scratch_buf_2[next_idx * dsW + dx];
+            sum_r += (next_color >> 16) & 0xFF;
+            sum_g += (next_color >> 8) & 0xFF;
+            sum_b += next_color & 0xFF;
+            
+            scratch_buf_1[dy * dsW + dx] = ((sum_r / window_size) << 16) | ((sum_g / window_size) << 8) | (sum_b / window_size);
+        }
+    }
+
+    // 3. Билинейный апсэмплинг, маскирование скругления и альфа-смешивание на FIXED-POINT MATH
+    uint32_t border_color = (tint_rgb == 0x1F222B) ? 0x4A505C : 0x61AFEF; 
+    
+    // Предрасчет целочисленного коэффициента прозрачности стекла (0 - 256)
+    int alpha = (int)(amount_f * 256.0f);
+    if (alpha < 0) alpha = 0;
+    if (alpha > 256) alpha = 256;
+    
+    int tint_r = (tint_rgb >> 16) & 0xFF;
+    int tint_g = (tint_rgb >> 8) & 0xFF;
+    int tint_b = tint_rgb & 0xFF;
 
     for (int ty = 0; ty < h; ty++) {
         int dst_y = y + ty;
         if (dst_y < 0 || dst_y >= (int)screen_h) continue;
 
-        float fy = (float)ty / 4.0f;
-        int y0 = (int)fy;
+        // Предрасчет вертикальных весов интерполяции с точностью до 8 бит
+        int y0 = ty >> 2; // ty / 4
+        if (y0 >= dsH) y0 = dsH - 1;
         int y1 = (y0 + 1 < dsH) ? y0 + 1 : dsH - 1;
-        float wy = fy - (float)y0;
+        int wy_int = (ty & 3) << 6; // (ty % 4) * 64, диапазон 0-256 (выровнен до 8 бит)
 
         uint32_t *dst_row = &draw_target[dst_y * screen_w];
 
@@ -619,48 +670,61 @@ static int l_draw_blur(lua_State *L) {
             int dst_x = x + tx;
             if (dst_x < 0 || dst_x >= (int)screen_w) continue;
 
-            // Если пиксель за пределами скругленного угла — пропускаем (оставляя нетронутым старый фон)
-            if (is_pixel_outside_corners(tx, ty, w, h, radius)) continue;
-
-            // Если пиксель попадает на рамку — рисуем светящуюся стеклянную грань
-            if (is_pixel_on_border(tx, ty, w, h, radius, 1)) {
-                dst_row[dst_x] = border_color;
-                continue;
+            // Оптимизация: Пропускаем тяжелые геометрические проверки для 90%+ площади (центра окна)
+            bool check_geometry = true;
+            if (tx >= radius && tx < w - radius && ty >= radius && ty < h - radius) {
+                check_geometry = false;
             }
 
-            // Билинейная интерполяция цвета размытия
-            int x0 = (int)((float)tx / 4.0f);
-            int x1 = (x0 + 1 < dsW) ? x0 + 1 : dsW - 1;
-            float wx = ((float)tx / 4.0f) - (float)x0;
+            if (check_geometry) {
+                // Если пиксель за пределами скругленного угла — пропускаем
+                if (is_pixel_outside_corners(tx, ty, w, h, radius)) continue;
 
+                // Стеклянная светящаяся граница
+                if (is_pixel_on_border(tx, ty, w, h, radius, 1)) {
+                    dst_row[dst_x] = border_color;
+                    continue;
+                }
+            }
+
+            // Горизонтальные веса интерполяции
+            int x0 = tx >> 2; // tx / 4
+            if (x0 >= dsW) x0 = dsW - 1;
+            int x1 = (x0 + 1 < dsW) ? x0 + 1 : dsW - 1;
+            int wx_int = (tx & 3) << 6; // (tx % 4) * 64
+
+            // Захватываем 4 соседних пикселя с уменьшенной размытой текстуры
             uint32_t c00 = scratch_buf_1[y0 * dsW + x0];
             uint32_t c10 = scratch_buf_1[y0 * dsW + x1];
             uint32_t c01 = scratch_buf_1[y1 * dsW + x0];
             uint32_t c11 = scratch_buf_1[y1 * dsW + x1];
 
-            float r00 = (c00 >> 16) & 0xFF, g00 = (c00 >> 8) & 0xFF, b00 = c00 & 0xFF;
-            float r10 = (c10 >> 16) & 0xFF, g10 = (c10 >> 8) & 0xFF, b10 = c10 & 0xFF;
-            float r01 = (c01 >> 16) & 0xFF, g01 = (c01 >> 8) & 0xFF, b01 = c01 & 0xFF;
-            float r11 = (c11 >> 16) & 0xFF, g11 = (c11 >> 8) & 0xFF, b11 = c11 & 0xFF;
+            // Разделяем цветовые каналы на веса
+            int r00 = (c00 >> 16) & 0xFF, g00 = (c00 >> 8) & 0xFF, b00 = c00 & 0xFF;
+            int r10 = (c10 >> 16) & 0xFF, g10 = (c10 >> 8) & 0xFF, b10 = c10 & 0xFF;
+            int r01 = (c01 >> 16) & 0xFF, g01 = (c01 >> 8) & 0xFF, b01 = c01 & 0xFF;
+            int r11 = (c11 >> 16) & 0xFF, g11 = (c11 >> 8) & 0xFF, b11 = c11 & 0xFF;
 
-            float r = (r00 * (1.0f - wx) + r10 * wx) * (1.0f - wy) + (r01 * (1.0f - wx) + r11 * wx) * wy;
-            float g = (g00 * (1.0f - wx) + g10 * wx) * (1.0f - wy) + (g01 * (1.0f - wx) + g11 * wx) * wy;
-            float b = (b00 * (1.0f - wx) + b10 * wx) * (1.0f - wy) + (b01 * (1.0f - wx) + b11 * wx) * wy;
+            // Билинейное интерполирование (Fixed-Point Integer Math: точность весов 16 бит (256 * 256))
+            int w00 = (256 - wx_int) * (256 - wy_int);
+            int w10 = wx_int * (256 - wy_int);
+            int w01 = (256 - wx_int) * wy_int;
+            int w11 = wx_int * wy_int;
 
-            // Смешивание размытого фона с тонировкой стекла
-            float tint_r = (tint_rgb >> 16) & 0xFF;
-            float tint_g = (tint_rgb >> 8) & 0xFF;
-            float tint_b = tint_rgb & 0xFF;
+            int blur_r = (r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11) >> 16;
+            int blur_g = (g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11) >> 16;
+            int blur_b = (b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11) >> 16;
 
-            int final_r = (int)(r * (1.0f - amount) + tint_r * amount);
-            int final_g = (int)(g * (1.0f - amount) + tint_g * amount);
-            int final_b = (int)(b * (1.0f - amount) + tint_b * amount);
+            // Быстрое целочисленное смешивание размытого фона с цветом тинта стекла
+            int final_r = (blur_r * (256 - alpha) + tint_r * alpha) >> 8;
+            int final_g = (blur_g * (256 - alpha) + tint_g * alpha) >> 8;
+            int final_b = (blur_b * (256 - alpha) + tint_b * alpha) >> 8;
 
-            // Создаем Liquid Sparkle (легкий световой градиент сверху вниз для ощущения объема стекла)
-            float sparkle = (1.0f - ((float)ty / (float)h)) * 12.0f;
-            final_r = (final_r + (int)sparkle > 255) ? 255 : final_r + (int)sparkle;
-            final_g = (final_g + (int)sparkle > 255) ? 255 : final_g + (int)sparkle;
-            final_b = (final_b + (int)sparkle > 255) ? 255 : final_b + (int)sparkle;
+            // Эффект Liquid Sparkle (легкий трехмерный световой градиент вверху окна)
+            int sparkle = ((h - ty) * 12) / h;
+            final_r = (final_r + sparkle > 255) ? 255 : final_r + sparkle;
+            final_g = (final_g + sparkle > 255) ? 255 : final_g + sparkle;
+            final_b = (final_b + sparkle > 255) ? 255 : final_b + sparkle;
 
             dst_row[dst_x] = (final_r << 16) | (final_g << 8) | final_b;
         }
@@ -695,7 +759,7 @@ void register_gui_api(lua_State *L) {
   lua_register(L, "drawRect", l_draw_rect);
   lua_register(L, "drawGradient", l_draw_gradient);
   lua_register(L, "drawLine", l_draw_line);
-  lua_register(L, "drawCircle", l_draw_circle); // Зарегистрировали круг!
+  lua_register(L, "drawCircle", l_draw_circle);
 
   lua_register(L, "animCreate", l_anim_create);
   lua_register(L, "animTo", l_anim_to);
@@ -722,7 +786,7 @@ void register_gui_api(lua_State *L) {
   lua_register(L, "killAllTasks", l_kill_all_tasks);
 
   lua_register(L, "shellExec", l_shell_exec);
-  lua_register(L, "drawBlur", l_draw_blur); // Заменили на сверхбыстрый SSE!
+  lua_register(L, "drawBlur", l_draw_blur); 
   lua_register(L, "setAppWindowPos", l_set_app_window_pos);
   lua_register(L, "playSound", l_play_sound);
 }
