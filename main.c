@@ -236,6 +236,15 @@ int main(int argc, char **argv) {
   uint64_t last_fg = 0;
 
   while (1) {
+    // Audio pump: keep AC'97 ring topped up regardless of frame time.
+    // SYS_AUDIO_PLAY internally yields when ring "dist" > 8, so calling
+    // api_tick_audio() multiple times per loop is safe and self-throttling.
+    // Without this, at 1920x1080 a single audio chunk/frame drains faster
+    // than we refill it -> stutter/crackle.
+    api_tick_audio();
+    api_tick_audio();
+    api_try_boot_sound();
+
     uint64_t fg = _syscall(74, 0, 0, 0, 0, 0);
     if (fg == 74) fg = 0;
 
@@ -362,16 +371,21 @@ int main(int argc, char **argv) {
     uint32_t frame_end = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
     uint32_t frame_elapsed = frame_end - frame_start;
 
-    // Стабильный фрейм-лимитер до 60 FPS: предотвращает скачки до 100% CPU и микро-фризы
+    // Стабильный фрейм-лимитер до 60 FPS + аудио-пампинг во время сна.
+    // Без пампинга при sys_sleep до 15 мс AC'97-кольцо успевает осушиться,
+    // и следующий кадр стартует уже с пустым ring -> шипение на 1920x1080.
     if (frame_elapsed < 16) {
-      sys_sleep(16 - frame_elapsed);
+      uint32_t to_sleep = 16 - frame_elapsed;
+      while (to_sleep > 0) {
+        uint32_t step = (to_sleep > 4) ? 4 : to_sleep;
+        sys_sleep(step);
+        api_tick_audio();
+        to_sleep -= step;
+      }
     } else {
       sys_yield();
     }
     frame_start = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
-
-    api_tick_audio();
-    api_try_boot_sound();
   }
 
   lua_close(L);
