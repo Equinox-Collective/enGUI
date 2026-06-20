@@ -1,8 +1,11 @@
 #include "desktop.h"
 #include "../api_gui.h"
-#include <equos.h>
-#include <stdlib.h>
 
+extern "C" {
+#include <stdlib.h>
+#include <equos.h>
+#include <eid.h>
+}
 extern uint32_t *backbuffer;
 extern uint32_t screen_w, screen_h;
 

@@ -2,8 +2,11 @@
 #include <equos.h>
 #include <stdbool.h>
 #include <stdint.h>
+
+extern "C" {
 #include <stdlib.h>
 #include <string.h>
+}
 
 extern uint32_t *draw_target;
 extern uint32_t screen_w, screen_h;

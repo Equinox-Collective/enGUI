@@ -3,6 +3,7 @@
 #include "../api_gui.h"
 #include "../imgui/imgui.h"
 #include <equos.h>
+#include <stdio.h>
 
 extern uint32_t screen_w, screen_h;
 extern const char* g_ActiveWindowTitle;

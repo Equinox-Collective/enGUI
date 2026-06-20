@@ -5,20 +5,20 @@ LD = x86_64-elf-ld
 SDK_DIR = ../../sdk
 SDK_OBJS = $(wildcard $(SDK_DIR)/lib/*.o)
 
+# Добавлены обязательные флаги: -fno-exceptions -fno-rtti -fno-threadsafe-statics
 CXXFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
-           -fno-omit-frame-pointer -I$(SDK_DIR)/include -I./imgui -O2 -std=c++17 -MMD -MP
+           -fno-omit-frame-pointer -fno-exceptions -fno-rtti -fno-threadsafe-statics \
+           -I$(SDK_DIR)/include -I./imgui -O2 -std=c++17 -MMD -MP
 
 CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
          -fno-omit-frame-pointer -I$(SDK_DIR)/include -I./imgui -O2 -MMD -MP
 
 LDFLAGS = -nostdlib -Ttext=0x1000000 -e _start
 
-# Находим все cpp-файлы в подкаталогах imgui/ и gui/
 IMGUI_SRCS = $(wildcard imgui/imgui*.cpp)
 GUI_SRCS = $(wildcard gui/*.cpp)
 SRCS = main.cpp api_gui.cpp $(IMGUI_SRCS) $(GUI_SRCS)
 
-# Генерируем список объектных файлов
 OBJS = $(SRCS:.cpp=.o)
 
 all: sysgui.elf

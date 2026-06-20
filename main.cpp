@@ -3,14 +3,19 @@
 #include "gui/panel.h"
 #include "gui/dock.h"
 #include "gui/win_manager.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+// Принудительно отключаем C++ Name Mangling для стандартных заголовков и библиотек SDK
+extern "C" {
+#include <stdlib.h>
+#include <string.h>
 #include <eid.h>
 #include <eid_ext.h>
 #include <equos.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
+}
 
+// Подключаем заголовки Dear ImGui
 #include "imgui/imgui.h"
 #include "imgui/imgui_internal.h"
 
