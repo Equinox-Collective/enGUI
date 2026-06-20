@@ -5,7 +5,7 @@ SDK_DIR = ../../sdk
 SDK_OBJS = $(wildcard $(SDK_DIR)/lib/*.o)
 
 CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
-		-fno-omit-frame-pointer -I$(SDK_DIR)/include -Ilua -O2 -MMD -MP
+         -fno-omit-frame-pointer -I$(SDK_DIR)/include -Ilua -O2 -MMD -MP
 
 LDFLAGS = -nostdlib -Ttext=0x1000000 -e _start
 
@@ -14,21 +14,26 @@ GUI_SRCS = main.c api_gui.c
 
 LUA_OBJS = $(LUA_SRCS:.c=.o)
 GUI_OBJS = $(GUI_SRCS:.c=.o)
+ALL_OBJS = $(LUA_OBJS) $(GUI_OBJS)
 
 all: sysgui.elf
 
-sysgui.elf: $(LUA_OBJS) $(GUI_OBJS)
-	$(LD) $(LDFLAGS) $(SDK_OBJS) $(LUA_OBJS) $(GUI_OBJS) -o $@
+# Добавлена явная зависимость от SDK_OBJS, чтобы sysgui перелинковывался при изменении SDK
+sysgui.elf: $(ALL_OBJS) $(SDK_OBJS)
+	$(LD) $(LDFLAGS) $(SDK_OBJS) $(ALL_OBJS) -o $@
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
+# Автоматическое отслеживание изменений в заголовочных файлах (.h)
+-include $(ALL_OBJS:.o=.d)
+
 ifeq ($(OS),Windows_NT)
     RM = del /f /q
-    CLEAN_FILES = $(subst /,\,$(LUA_OBJS) $(GUI_OBJS) sysgui.elf)
+    CLEAN_FILES = $(subst /,\,$(ALL_OBJS) $(ALL_OBJS:.o=.d) sysgui.elf)
 else
     RM = rm -f
-    CLEAN_FILES = $(LUA_OBJS) $(GUI_OBJS) sysgui.elf
+    CLEAN_FILES = $(ALL_OBJS) $(ALL_OBJS:.o=.d) sysgui.elf
 endif
 
 clean:
