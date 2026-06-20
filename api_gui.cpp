@@ -1,29 +1,16 @@
 #include "api_gui.h"
-#include "lua/lauxlib.h"
-#include "lua/lua.h"
-#include "lua/lualib.h"
-#include <eid.h>
-#include <eid_ext.h>
 #include <equos.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 extern uint32_t *draw_target;
 extern uint32_t screen_w, screen_h;
-extern eid_ctx_t eid_ctx;
-extern int k_app_win_x, k_app_win_y, k_app_win_w, k_app_win_h;
-extern bool k_app_win_active;
 
 extern void sysgui_mark_dirty(int x, int y, int w, int h);
 
-#define MAX_ANIMS 32
-static eid_anim_t anims[MAX_ANIMS];
-static int anim_count = 0;
-
-// --- СТАТИЧЕСКИЕ БУФЕРЫ КЭША ДЛЯ БЛЮРА (Исключают фрагментацию кучи) ---
+// --- СТАТИЧЕСКИЕ БУФЕРЫ КЭША ДЛЯ БЛЮРА ---
 static uint32_t *scratch_buf_1 = NULL;
 static uint32_t *scratch_buf_2 = NULL;
 static int scratch_allocated_w = 0;
@@ -62,8 +49,6 @@ static uint8_t *wav_pcm_data = NULL;
 static uint32_t wav_pcm_size = 0;
 static uint32_t wav_pcm_pos = 0;
 static bool wav_playing = false;
-
-static lua_State *g_lua = NULL;
 
 void api_tick_audio(void) {
   if (!wav_playing || !wav_pcm_data) return;
@@ -128,7 +113,7 @@ static void start_playback(uint8_t *pcm, uint32_t len, uint32_t rate) {
   wav_playing  = true;
 }
 
-static bool play_wav_file(const char *filename) {
+bool play_wav_file(const char *filename) {
   uint32_t size = 0;
   uint64_t addr = _syscall(2, (uint64_t)filename, (uint64_t)&size, 0, 0, 0);
   if (!addr) return false;
@@ -138,12 +123,6 @@ static bool play_wav_file(const char *filename) {
   return true;
 }
 
-static int l_play_sound(lua_State *L) {
-  const char *filename = luaL_checkstring(L, 1);
-  lua_pushboolean(L, play_wav_file(filename));
-  return 1;
-}
-
 #ifndef BOOT_SOUND_ENABLED
 #define BOOT_SOUND_ENABLED 1
 #endif
@@ -151,22 +130,12 @@ static int l_play_sound(lua_State *L) {
 
 static int audio_is_ready(void) { return (int)_syscall(22, 0, 0, 0, 0, 0); }
 
-static bool boot_sound_cfg_enabled(void) {
-  if (!g_lua) return true;
-  lua_getglobal(g_lua, "BOOT_SOUND_ENABLED");
-  bool enabled = true;
-  if (lua_isboolean(g_lua, -1)) enabled = lua_toboolean(g_lua, -1);
-  lua_pop(g_lua, 1);
-  return enabled;
-}
-
 static uint8_t *boot_pcm = NULL;
 static uint32_t boot_len = 0, boot_rate = 0;
 static bool     boot_loaded = false;
 
 void api_preload_boot_sound(void) {
 #if BOOT_SOUND_ENABLED
-  if (!boot_sound_cfg_enabled()) return;
   uint32_t size = 0;
   uint64_t addr = _syscall(2, (uint64_t)BOOT_SOUND_PATH, (uint64_t)&size, 0, 0, 0);
   if (!addr) return;
@@ -185,304 +154,6 @@ void api_try_boot_sound(void) {
   start_playback(boot_pcm, boot_len, boot_rate);
   s_done = true;
 #endif
-}
-
-bool is_any_anim_active(void) {
-  for (int i = 0; i < anim_count; i++) {
-    if (anims[i].active) return true;
-  }
-  return false;
-}
-
-static int l_anim_create(lua_State *L) {
-  float duration = (float)luaL_checknumber(L, 1);
-  int ease = luaL_checkinteger(L, 2);
-  if (anim_count >= MAX_ANIMS) {
-    lua_pushinteger(L, -1);
-    return 1;
-  }
-  int id = anim_count++;
-  eid_anim_init(&anims[id], duration, (eid_ease_t)ease);
-  lua_pushinteger(L, id);
-  return 1;
-}
-
-static int l_anim_to(lua_State *L) {
-  int id = luaL_checkinteger(L, 1);
-  float target = (float)luaL_checknumber(L, 2);
-  if (id >= 0 && id < anim_count) eid_anim_to(&anims[id], target);
-  return 0;
-}
-
-static int l_anim_step(lua_State *L) {
-  int id = luaL_checkinteger(L, 1);
-  float dt = (float)luaL_checknumber(L, 2);
-  if (id >= 0 && id < anim_count) eid_anim_step(&anims[id], dt);
-  return 0;
-}
-
-static int l_anim_eval(lua_State *L) {
-  int id = luaL_checkinteger(L, 1);
-  if (id >= 0 && id < anim_count) {
-    lua_pushnumber(L, eid_anim_eval(&anims[id]));
-  } else {
-    lua_pushnumber(L, 0.0f);
-  }
-  return 1;
-}
-
-static int l_draw_text(lua_State *L) {
-  const char *str = luaL_checkstring(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
-  uint32_t color = (uint32_t)luaL_checknumber(L, 4);
-
-  eid_draw_text(draw_target, screen_w, screen_h, x, y, str, color);
-  sysgui_mark_dirty(x, y, strlen(str) * 8, 16);
-  return 0;
-}
-
-static int l_draw_rect(lua_State *L) {
-  int x = luaL_checkinteger(L, 1);
-  int y = luaL_checkinteger(L, 2);
-  int w = luaL_checkinteger(L, 3);
-  int h = luaL_checkinteger(L, 4);
-  uint32_t color = (uint32_t)luaL_checknumber(L, 5);
-
-  eid_draw_rect(draw_target, screen_w, screen_h, x, y, w, h, color);
-  sysgui_mark_dirty(x, y, w, h);
-  return 0;
-}
-
-static int l_draw_gradient(lua_State *L) {
-  int x = luaL_checkinteger(L, 1);
-  int y = luaL_checkinteger(L, 2);
-  int w = luaL_checkinteger(L, 3);
-  int h = luaL_checkinteger(L, 4);
-  uint32_t c1 = (uint32_t)luaL_checknumber(L, 5);
-  uint32_t c2 = (uint32_t)luaL_checknumber(L, 6);
-  bool vertical = lua_toboolean(L, 7);
-
-  eid_draw_gradient_rect(draw_target, screen_w, screen_h, x, y, w, h, c1, c2, vertical);
-  sysgui_mark_dirty(x, y, w, h);
-  return 0;
-}
-
-static int l_draw_line(lua_State *L) {
-  int x1 = luaL_checkinteger(L, 1);
-  int y1 = luaL_checkinteger(L, 2);
-  int x2 = luaL_checkinteger(L, 3);
-  int y2 = luaL_checkinteger(L, 4);
-  uint32_t color = (uint32_t)luaL_checknumber(L, 5);
-
-  eid_draw_line(draw_target, screen_w, screen_h, x1, y1, x2, y2, color);
-  int min_x = x1 < x2 ? x1 : x2;
-  int min_y = y1 < y2 ? y1 : y2;
-  int w = (x1 > x2 ? x1 : x2) - min_x + 1;
-  int h = (y1 > y2 ? y1 : y2) - min_y + 1;
-  sysgui_mark_dirty(min_x, min_y, w, h);
-  return 0;
-}
-
-static int l_draw_circle(lua_State *L) {
-  int cx = luaL_checkinteger(L, 1);
-  int cy = luaL_checkinteger(L, 2);
-  int r = luaL_checkinteger(L, 3);
-  uint32_t color = (uint32_t)luaL_checknumber(L, 4);
-  bool fill = lua_toboolean(L, 5);
-
-  for (int y = -r; y <= r; y++) {
-    for (int x = -r; x <= r; x++) {
-      int dist2 = x * x + y * y;
-      if (fill) {
-        if (dist2 <= r * r) {
-          eid_draw_pixel(draw_target, screen_w, screen_h, cx + x, cy + y, color);
-        }
-      } else {
-        if (dist2 <= r * r && dist2 > (r - 2) * (r - 2)) {
-          eid_draw_pixel(draw_target, screen_w, screen_h, cx + x, cy + y, color);
-        }
-      }
-    }
-  }
-  sysgui_mark_dirty(cx - r, cy - r, r * 2 + 1, r * 2 + 1);
-  return 0;
-}
-
-static int l_button(lua_State *L) {
-  const char *label = luaL_checkstring(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
-  int w = luaL_checkinteger(L, 4);
-  int h = luaL_checkinteger(L, 5);
-
-  uint32_t state = eid_button(&eid_ctx, label, x, y, w, h);
-  sysgui_mark_dirty(x - 2, y - 2, w + 4, h + 6);
-  lua_pushboolean(L, (state & EID_STATE_CLICKED) != 0);
-  return 1;
-}
-
-static int l_checkbox(lua_State *L) {
-  const char *label = luaL_checkstring(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
-  bool val = lua_toboolean(L, 4);
-
-  eid_checkbox(&eid_ctx, label, x, y, &val);
-  sysgui_mark_dirty(x, y, 18 + 8 + strlen(label) * 8, 20);
-  lua_pushboolean(L, val);
-  return 1;
-}
-
-static int l_slider(lua_State *L) {
-  const char *label = luaL_checkstring(L, 1);
-  int x = luaL_checkinteger(L, 2);
-  int y = luaL_checkinteger(L, 3);
-  int w = luaL_checkinteger(L, 4);
-  float val = (float)luaL_checknumber(L, 5);
-  float min = (float)luaL_checknumber(L, 6);
-  float max = (float)luaL_checknumber(L, 7);
-
-  eid_slider(&eid_ctx, label, x, y, w, &val, min, max);
-  sysgui_mark_dirty(x, y - 4, w, 26);
-  lua_pushnumber(L, val);
-  return 1;
-}
-
-static int l_exec(lua_State *L) {
-  const char *cmd = luaL_checkstring(L, 1);
-  lua_pushinteger(L, sys_exec(cmd));
-  return 1;
-}
-
-static int l_get_uptime(lua_State *L) {
-  uint32_t ms = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
-  lua_pushnumber(L, (double)ms / 1000.0);
-  return 1;
-}
-
-static int l_get_mem_info(lua_State *L) {
-  lua_pushnumber(L, (double)sys_get_used_mem());
-  lua_pushnumber(L, (double)sys_get_total_mem());
-  return 2;
-}
-
-static int l_get_mouse(lua_State *L) {
-  lua_pushinteger(L, eid_ctx.mx);
-  lua_pushinteger(L, eid_ctx.my);
-  lua_pushboolean(L, eid_ctx.m_down);
-  return 3;
-}
-
-static int l_get_last_key(lua_State *L) {
-  lua_pushinteger(L, eid_ctx.last_key);
-  eid_ctx.last_key = 0;
-  return 1;
-}
-
-static int l_scancode_to_ascii(lua_State *L) {
-  int sc = luaL_checkinteger(L, 1);
-  bool shift = lua_toboolean(L, 2);
-  char c = eid_scancode_to_ascii((uint8_t)sc, shift);
-  char str[2] = {c, 0};
-  lua_pushstring(L, str);
-  return 1;
-}
-
-static int l_read_file(lua_State *L) {
-  const char *filename = luaL_checkstring(L, 1);
-  uint32_t size = 0;
-  uint64_t addr = _syscall(2, (uint64_t)filename, (uint64_t)&size, 0, 0, 0);
-  if (addr && size > 0) {
-    lua_pushlstring(L, (const char *)addr, size);
-  } else {
-    lua_pushnil(L);
-  }
-  return 1;
-}
-
-static int l_save_file(lua_State *L) {
-  const char *filename = luaL_checkstring(L, 1);
-  size_t len = 0;
-  const char *data = luaL_checklstring(L, 2, &len);
-  write_file(filename, (void *)data, (int)len);
-  return 0;
-}
-
-static int l_get_files(lua_State *L) {
-  lua_newtable(L);
-  int idx = 1;
-  struct { char name[128]; uint32_t size; char dev[32]; } entry;
-
-  for (int i = 0;; i++) {
-    uint64_t ret = _syscall(4, i, (uint64_t)&entry, 0, 0, 0);
-    if (!ret) break;
-
-    lua_newtable(L);
-    lua_pushstring(L, "name"); lua_pushstring(L, entry.name); lua_settable(L, -3);
-    lua_pushstring(L, "size"); lua_pushinteger(L, entry.size); lua_settable(L, -3);
-    lua_pushstring(L, "dev");  lua_pushstring(L, entry.dev);  lua_settable(L, -3);
-    lua_rawseti(L, -2, idx++);
-  }
-  return 1;
-}
-
-static int l_get_screen_size(lua_State *L) {
-  lua_pushinteger(L, screen_w);
-  lua_pushinteger(L, screen_h);
-  return 2;
-}
-
-static int l_get_tasks(lua_State *L) {
-  lua_newtable(L);
-  int out_idx = 1;
-  sys_task_info_t info;
-  for (int i = 0; i < 256; i++) {
-    uint64_t ok = _syscall(70, (uint64_t)i, (uint64_t)&info, 0, 0, 0);
-    if (!ok) break;
-    lua_newtable(L);
-    lua_pushstring(L, "pid");   lua_pushinteger(L, (lua_Integer)info.pid); lua_settable(L, -3);
-    lua_pushstring(L, "state"); lua_pushstring(L, info.running ? "RUNNING" : "STOPPED"); lua_settable(L, -3);
-    lua_pushstring(L, "cr3");   lua_pushinteger(L, (lua_Integer)info.cr3); lua_settable(L, -3);
-    lua_pushstring(L, "brk");   lua_pushinteger(L, (lua_Integer)info.brk); lua_settable(L, -3);
-    lua_rawseti(L, -2, out_idx++);
-  }
-  return 1;
-}
-
-static int l_kill_task(lua_State *L) {
-  lua_Integer pid = luaL_checkinteger(L, 1);
-  lua_pushboolean(L, _syscall(71, (uint64_t)pid, 0, 0, 0, 0) ? 1 : 0);
-  return 1;
-}
-
-static int l_kill_all_tasks(lua_State *L) {
-  lua_pushinteger(L, (lua_Integer)_syscall(72, 0, 0, 0, 0, 0));
-  return 1;
-}
-
-static int l_shell_exec(lua_State *L) {
-  const char *line = luaL_checkstring(L, 1);
-  static char outbuf[2048];
-  outbuf[0] = '\0';
-  uint64_t n = _syscall(73, (uint64_t)line, (uint64_t)outbuf, (uint64_t)sizeof(outbuf), 0, 0);
-  if (n >= sizeof(outbuf)) n = sizeof(outbuf) - 1;
-  outbuf[n] = '\0';
-  lua_pushlstring(L, outbuf, (size_t)n);
-  return 1;
-}
-
-static int l_set_app_window_pos(lua_State *L) {
-  int x = luaL_checkinteger(L, 1);
-  int y = luaL_checkinteger(L, 2);
-  int w = luaL_checkinteger(L, 3);
-  int h = luaL_checkinteger(L, 4);
-
-  k_app_win_x = x; k_app_win_y = y;
-  k_app_win_w = w; k_app_win_h = h;
-  k_app_win_active = (w > 0 && h > 0);
-  _syscall(36, (uint64_t)x, (uint64_t)y, (uint64_t)w, (uint64_t)h, 0);
-  return 0;
 }
 
 // --- ВСПОМОГАТЕЛЬНЫЕ КЛИППИНГ-ФУНКЦИИ КРУГЛЫХ СТЕКЛЯННЫХ УГЛОВ ---
@@ -533,24 +204,16 @@ static inline bool is_pixel_on_border(int tx, int ty, int w, int h, int r, int b
     return false;
 }
 
-// --- ГЛАВНАЯ ФУНКЦИЯ ACRYLIC GLASS BLUR (Высокооптимизированный целочисленный fixed-point даунсэмплинг и быстрый скользящий бокс-фильтр) ---
-static int l_draw_blur(lua_State *L) {
-    int x = luaL_checkinteger(L, 1);
-    int y = luaL_checkinteger(L, 2);
-    int w = luaL_checkinteger(L, 3);
-    int h = luaL_checkinteger(L, 4);
-    float amount_f = (float)luaL_checknumber(L, 5); // Коэффициент прозрачности стекла (0.0 - 1.0)
-    int radius = (lua_gettop(L) >= 6) ? luaL_checkinteger(L, 6) : 12; // Радиус скругления
-    uint32_t tint_rgb = (lua_gettop(L) >= 7) ? (uint32_t)luaL_checknumber(L, 7) : 0x1F222B; // Тинт стекла
-
-    if (w <= 16 || h <= 16) return 0;
+// --- ГЛАВНАЯ ФУНКЦИЯ ACRYLIC GLASS BLUR ---
+void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, uint32_t tint_rgb) {
+    if (w <= 16 || h <= 16) return;
 
     int dsW = w / 4;
     int dsH = h / 4;
     ensure_scratch_buffers(dsW, dsH);
-    if (!scratch_buf_1 || !scratch_buf_2) return 0;
+    if (!scratch_buf_1 || !scratch_buf_2) return;
 
-    // 1. Клиппированный безопасный даунсэмплинг (препятствует крашам памяти при перетаскивании за границы экрана)
+    // 1. Клиппированный безопасный даунсэмплинг
     for (int dy = 0; dy < dsH; dy++) {
         int src_y = y + (dy * 4);
         if (src_y < 0) src_y = 0;
@@ -567,18 +230,16 @@ static int l_draw_blur(lua_State *L) {
         }
     }
 
-    // 2. Сверхбыстрое размытие по методу скользящего окна (Sliding Window Box Blur) за O(1) от радиуса
+    // 2. Скользящее окно Box Blur
     int r_blur = 2;
-    int window_size = r_blur * 2 + 1; // 5
+    int window_size = r_blur * 2 + 1;
 
-    // Горизонтальный скользящий проход
     for (int dy = 0; dy < dsH; dy++) {
         uint32_t *row_src = &scratch_buf_1[dy * dsW];
         uint32_t *row_dst = &scratch_buf_2[dy * dsW];
         
         int sum_r = 0, sum_g = 0, sum_b = 0;
         
-        // Инициализируем скользящую сумму для первого пикселя строки с зажимом границ
         for (int k = -r_blur; k <= r_blur; k++) {
             int px = (k < 0) ? 0 : (k >= dsW ? dsW - 1 : k);
             uint32_t color = row_src[px];
@@ -588,7 +249,6 @@ static int l_draw_blur(lua_State *L) {
         }
         row_dst[0] = ((sum_r / window_size) << 16) | ((sum_g / window_size) << 8) | (sum_b / window_size);
         
-        // Сдвигаем окно по строке: убираем старый левый пиксель, добавляем новый правый
         for (int dx = 1; dx < dsW; dx++) {
             int prev_idx = dx - 1 - r_blur;
             if (prev_idx < 0) prev_idx = 0;
@@ -608,11 +268,9 @@ static int l_draw_blur(lua_State *L) {
         }
     }
 
-    // Вертикальный скользящий проход
     for (int dx = 0; dx < dsW; dx++) {
         int sum_r = 0, sum_g = 0, sum_b = 0;
         
-        // Инициализируем скользящую сумму по столбцу
         for (int k = -r_blur; k <= r_blur; k++) {
             int py = (k < 0) ? 0 : (k >= dsH ? dsH - 1 : k);
             uint32_t color = scratch_buf_2[py * dsW + dx];
@@ -622,7 +280,6 @@ static int l_draw_blur(lua_State *L) {
         }
         scratch_buf_1[0 * dsW + dx] = ((sum_r / window_size) << 16) | ((sum_g / window_size) << 8) | (sum_b / window_size);
         
-        // Сдвигаем окно вниз
         for (int dy = 1; dy < dsH; dy++) {
             int prev_idx = dy - 1 - r_blur;
             if (prev_idx < 0) prev_idx = 0;
@@ -642,10 +299,9 @@ static int l_draw_blur(lua_State *L) {
         }
     }
 
-    // 3. Билинейный апсэмплинг, маскирование скругления и альфа-смешивание на FIXED-POINT MATH
+    // 3. Билинейный апсэмплинг и альфа-смешивание
     uint32_t border_color = (tint_rgb == 0x1F222B) ? 0x4A505C : 0x61AFEF; 
     
-    // Предрасчет целочисленного коэффициента прозрачности стекла (0 - 256)
     int alpha = (int)(amount_f * 256.0f);
     if (alpha < 0) alpha = 0;
     if (alpha > 256) alpha = 256;
@@ -658,11 +314,10 @@ static int l_draw_blur(lua_State *L) {
         int dst_y = y + ty;
         if (dst_y < 0 || dst_y >= (int)screen_h) continue;
 
-        // Предрасчет вертикальных весов интерполяции с точностью до 8 бит
-        int y0 = ty >> 2; // ty / 4
+        int y0 = ty >> 2;
         if (y0 >= dsH) y0 = dsH - 1;
         int y1 = (y0 + 1 < dsH) ? y0 + 1 : dsH - 1;
-        int wy_int = (ty & 3) << 6; // (ty % 4) * 64, диапазон 0-256 (выровнен до 8 бит)
+        int wy_int = (ty & 3) << 6;
 
         uint32_t *dst_row = &draw_target[dst_y * screen_w];
 
@@ -670,42 +325,34 @@ static int l_draw_blur(lua_State *L) {
             int dst_x = x + tx;
             if (dst_x < 0 || dst_x >= (int)screen_w) continue;
 
-            // Оптимизация: Пропускаем тяжелые геометрические проверки для 90%+ площади (центра окна)
             bool check_geometry = true;
             if (tx >= radius && tx < w - radius && ty >= radius && ty < h - radius) {
                 check_geometry = false;
             }
 
             if (check_geometry) {
-                // Если пиксель за пределами скругленного угла — пропускаем
                 if (is_pixel_outside_corners(tx, ty, w, h, radius)) continue;
-
-                // Стеклянная светящаяся граница
                 if (is_pixel_on_border(tx, ty, w, h, radius, 1)) {
                     dst_row[dst_x] = border_color;
                     continue;
                 }
             }
 
-            // Горизонтальные веса интерполяции
-            int x0 = tx >> 2; // tx / 4
+            int x0 = tx >> 2;
             if (x0 >= dsW) x0 = dsW - 1;
             int x1 = (x0 + 1 < dsW) ? x0 + 1 : dsW - 1;
-            int wx_int = (tx & 3) << 6; // (tx % 4) * 64
+            int wx_int = (tx & 3) << 6;
 
-            // Захватываем 4 соседних пикселя с уменьшенной размытой текстуры
             uint32_t c00 = scratch_buf_1[y0 * dsW + x0];
             uint32_t c10 = scratch_buf_1[y0 * dsW + x1];
             uint32_t c01 = scratch_buf_1[y1 * dsW + x0];
             uint32_t c11 = scratch_buf_1[y1 * dsW + x1];
 
-            // Разделяем цветовые каналы на веса
             int r00 = (c00 >> 16) & 0xFF, g00 = (c00 >> 8) & 0xFF, b00 = c00 & 0xFF;
             int r10 = (c10 >> 16) & 0xFF, g10 = (c10 >> 8) & 0xFF, b10 = c10 & 0xFF;
             int r01 = (c01 >> 16) & 0xFF, g01 = (c01 >> 8) & 0xFF, b01 = c01 & 0xFF;
             int r11 = (c11 >> 16) & 0xFF, g11 = (c11 >> 8) & 0xFF, b11 = c11 & 0xFF;
 
-            // Билинейное интерполирование (Fixed-Point Integer Math: точность весов 16 бит (256 * 256))
             int w00 = (256 - wx_int) * (256 - wy_int);
             int w10 = wx_int * (256 - wy_int);
             int w01 = (256 - wx_int) * wy_int;
@@ -715,12 +362,10 @@ static int l_draw_blur(lua_State *L) {
             int blur_g = (g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11) >> 16;
             int blur_b = (b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11) >> 16;
 
-            // Быстрое целочисленное смешивание размытого фона с цветом тинта стекла
             int final_r = (blur_r * (256 - alpha) + tint_r * alpha) >> 8;
             int final_g = (blur_g * (256 - alpha) + tint_g * alpha) >> 8;
             int final_b = (blur_b * (256 - alpha) + tint_b * alpha) >> 8;
 
-            // Эффект Liquid Sparkle (легкий трехмерный световой градиент вверху окна)
             int sparkle = ((h - ty) * 12) / h;
             final_r = (final_r + sparkle > 255) ? 255 : final_r + sparkle;
             final_g = (final_g + sparkle > 255) ? 255 : final_g + sparkle;
@@ -731,62 +376,4 @@ static int l_draw_blur(lua_State *L) {
     }
 
     sysgui_mark_dirty(x, y, w, h);
-    return 0;
-}
-
-static void register_key_constants(lua_State *L) {
-  struct { const char *name; int code; } keys[] = {
-      {"KEY_UP",     0x148}, {"KEY_DOWN",   0x150},
-      {"KEY_LEFT",   0x14B}, {"KEY_RIGHT",  0x14D},
-      {"KEY_PGUP",   0x149}, {"KEY_PGDN",   0x151},
-      {"KEY_HOME",   0x147}, {"KEY_END",    0x14F},
-      {"KEY_INSERT", 0x152}, {"KEY_DELETE", 0x153},
-      {"KEY_ENTER",     0x1C}, {"KEY_BACKSPACE", 0x0E},
-      {"KEY_TAB",       0x0F}, {"KEY_ESC",       0x01},
-      {"KEY_SPACE",     0x39}, {"KEY_LSHIFT",    0x2A},
-      {"KEY_RSHIFT",    0x36},
-  };
-  for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
-    lua_pushinteger(L, keys[i].code);
-    lua_setglobal(L, keys[i].name);
-  }
-}
-
-void register_gui_api(lua_State *L) {
-  g_lua = L;
-  register_key_constants(L);
-  lua_register(L, "drawText", l_draw_text);
-  lua_register(L, "drawRect", l_draw_rect);
-  lua_register(L, "drawGradient", l_draw_gradient);
-  lua_register(L, "drawLine", l_draw_line);
-  lua_register(L, "drawCircle", l_draw_circle);
-
-  lua_register(L, "animCreate", l_anim_create);
-  lua_register(L, "animTo", l_anim_to);
-  lua_register(L, "animStep", l_anim_step);
-  lua_register(L, "animEval", l_anim_eval);
-
-  lua_register(L, "button", l_button);
-  lua_register(L, "checkbox", l_checkbox);
-  lua_register(L, "slider", l_slider);
-
-  lua_register(L, "exec", l_exec);
-  lua_register(L, "getUptime", l_get_uptime);
-  lua_register(L, "getMemInfo", l_get_mem_info);
-  lua_register(L, "getMouse", l_get_mouse);
-  lua_register(L, "getLastKey", l_get_last_key);
-  lua_register(L, "scancodeToAscii", l_scancode_to_ascii);
-  lua_register(L, "readFile", l_read_file);
-  lua_register(L, "saveFile", l_save_file);
-  lua_register(L, "getFiles", l_get_files);
-  lua_register(L, "getScreenSize", l_get_screen_size);
-
-  lua_register(L, "getTasks", l_get_tasks);
-  lua_register(L, "killTask", l_kill_task);
-  lua_register(L, "killAllTasks", l_kill_all_tasks);
-
-  lua_register(L, "shellExec", l_shell_exec);
-  lua_register(L, "drawBlur", l_draw_blur); 
-  lua_register(L, "setAppWindowPos", l_set_app_window_pos);
-  lua_register(L, "playSound", l_play_sound);
 }

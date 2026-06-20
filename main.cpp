@@ -1,7 +1,4 @@
 #include "api_gui.h"
-#include "lua/lauxlib.h"
-#include "lua/lua.h"
-#include "lua/lualib.h"
 #include <eid.h>
 #include <eid_ext.h>
 #include <equos.h>
@@ -11,14 +8,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Подключаем заголовки Dear ImGui
+#include "imgui/imgui.h"
+#include "imgui/imgui_internal.h"
+
 uint32_t *vram = NULL;
 uint32_t *backbuffer = NULL;
 uint32_t *draw_target = NULL;
 uint32_t screen_w = 1920;
 uint32_t screen_h = 1080;
-extern void api_tick_audio(void);
-extern void api_preload_boot_sound(void);
-extern void api_try_boot_sound(void);
+
 int k_app_win_x = 100;
 int k_app_win_y = 100;
 int k_app_win_w = 640;
@@ -71,9 +70,8 @@ void sysgui_clear_dirty_grid(void) {
   }
 }
 
-// Высокопроизводительное SSE копирование с защитой от General Protection Fault (#GP) на невыровненных адресах
+// Высокопроизводительное SSE копирование
 static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
-  // Убеждаемся, что адрес выровнен по границе 16 байт
   if (((uintptr_t)dest & 15) == 0 && ((uintptr_t)src & 15) == 0 && (bytes % 16) == 0) {
     size_t blocks = bytes / 64;
     uint8_t *d = (uint8_t *)dest;
@@ -101,7 +99,6 @@ static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
     }
     __asm__ volatile("sfence" ::: "memory");
   } else {
-    // Безопасный стандартный fallback
     memcpy(dest, src, bytes);
     __asm__ volatile("sfence" ::: "memory");
   }
@@ -115,9 +112,6 @@ void copy_dirty_to_vram(void) {
     g_boot_anim_signaled = 1;
     _syscall(88, 0, 0, 0, 0, 0);
   }
-
-  extern int k_app_win_x, k_app_win_y, k_app_win_w, k_app_win_h;
-  extern bool k_app_win_active;
 
   for (int r = 0; r < grid_rows; r++) {
     int c = 0;
@@ -167,7 +161,6 @@ void copy_dirty_to_vram(void) {
 }
 
 eid_ctx_t eid_ctx;
-extern bool is_any_anim_active(void);
 
 void draw_cursor_user(uint32_t *fb, int x, int y, int w, int h) {
   static const int cursor_map[8][8] = {
@@ -184,6 +177,178 @@ void draw_cursor_user(uint32_t *fb, int x, int y, int w, int h) {
       }
     }
   }
+}
+
+// --- СТРУКТУРА ТЕКСТУРЫ И ПРОГРАММНЫЙ РАСТЕРИЗАТОР DEAR IMGUI ---
+struct SoftwareTexture {
+    uint32_t* pixels;
+    int width;
+    int height;
+};
+
+static SoftwareTexture g_FontTexture;
+
+static inline float edgeFunction(const ImVec2& a, const ImVec2& b, const ImVec2& c) {
+    return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
+}
+
+// Функция отрисовки текстурированных / цветных треугольников ImGui
+void draw_triangle_software(const ImDrawVert& v0, const ImDrawVert& v1, const ImDrawVert& v2, 
+                            const SoftwareTexture* tex, const ImVec4& clip_rect) {
+    float min_x = ImMin(v0.pos.x, ImMin(v1.pos.x, v2.pos.x));
+    float max_x = ImMax(v0.pos.x, ImMax(v1.pos.x, v2.pos.x));
+    float min_y = ImMin(v0.pos.y, ImMin(v1.pos.y, v2.pos.y));
+    float max_y = ImMax(v0.pos.y, ImMax(v1.pos.y, v2.pos.y));
+
+    int x_start = ImMax(0, ImMax((int)min_x, (int)clip_rect.x));
+    int x_end   = ImMin((int)screen_w - 1, ImMin((int)max_x, (int)clip_rect.z - 1));
+    int y_start = ImMax(0, ImMax((int)min_y, (int)clip_rect.y));
+    int y_end   = ImMin((int)screen_h - 1, ImMin((int)max_y, (int)clip_rect.w - 1));
+
+    if (x_start > x_end || y_start > y_end) return;
+
+    float area = edgeFunction(v0.pos, v1.pos, v2.pos);
+    if (ImFabs(area) < 0.00001f) return;
+    float inv_area = 1.0f / area;
+
+    auto unpack_color = [](ImU32 col) {
+        float r = (float)(col & 0xFF);
+        float g = (float)((col >> 8) & 0xFF);
+        float b = (float)((col >> 16) & 0xFF);
+        float a = (float)((col >> 24) & 0xFF);
+        return ImVec4(r, g, b, a);
+    };
+
+    ImVec4 c0 = unpack_color(v0.col);
+    ImVec4 c1 = unpack_color(v1.col);
+    ImVec4 c2 = unpack_color(v2.col);
+
+    for (int y = y_start; y <= y_end; y++) {
+        uint32_t* row = &draw_target[y * screen_w];
+        for (int x = x_start; x <= x_end; x++) {
+            ImVec2 p((float)x + 0.5f, (float)y + 0.5f);
+            float w0 = edgeFunction(v1.pos, v2.pos, p);
+            float w1 = edgeFunction(v2.pos, v0.pos, p);
+            float w2 = edgeFunction(v0.pos, v1.pos, p);
+
+            if (area < 0) {
+                if (w0 > 0 || w1 > 0 || w2 > 0) continue;
+            } else {
+                if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+            }
+
+            w0 *= inv_area;
+            w1 *= inv_area;
+            float w2_norm = 1.0f - w0 - w1;
+
+            float u = w0 * v0.uv.x + w1 * v1.uv.x + w2_norm * v2.uv.x;
+            float v = w0 * v0.uv.y + w1 * v1.uv.y + w2_norm * v2.uv.y;
+
+            float r = w0 * c0.x + w1 * c1.x + w2_norm * c2.x;
+            float g = w0 * c0.y + w1 * c1.y + w2_norm * c2.y;
+            float b = w0 * c0.z + w1 * c1.z + w2_norm * c2.z;
+            float a = w0 * c0.w + w1 * c1.w + w2_norm * c2.w;
+
+            if (tex) {
+                int tx = (int)(u * (tex->width - 1));
+                int ty = (int)(v * (tex->height - 1));
+                if (tx >= 0 && tx < tex->width && ty >= 0 && ty < tex->height) {
+                    uint32_t tex_pixel = tex->pixels[ty * tex->width + tx];
+                    float tex_r = (float)(tex_pixel & 0xFF);
+                    float tex_g = (float)((tex_pixel >> 8) & 0xFF);
+                    float tex_b = (float)((tex_pixel >> 16) & 0xFF);
+                    float tex_a = (float)((tex_pixel >> 24) & 0xFF);
+
+                    r = (r * tex_r) / 255.0f;
+                    g = (g * tex_g) / 255.0f;
+                    b = (b * tex_b) / 255.0f;
+                    a = (a * tex_a) / 255.0f;
+                }
+            }
+
+            if (a <= 0.0f) continue;
+
+            if (a >= 255.0f) {
+                row[x] = ((int)r) | (((int)g) << 8) | (((int)b) << 16);
+            } else {
+                uint32_t bg = row[x];
+                int bg_r = bg & 0xFF;
+                int bg_g = (bg >> 8) & 0xFF;
+                int bg_b = (bg >> 16) & 0xFF;
+
+                int out_r = (int)((r * a + bg_r * (255.0f - a)) / 255.0f);
+                int out_g = (int)((g * a + bg_g * (255.0f - a)) / 255.0f);
+                int out_b = (int)((b * a + bg_b * (255.0f - a)) / 255.0f);
+
+                row[x] = out_r | (out_g << 8) | (out_b << 16);
+            }
+        }
+    }
+}
+
+void ImGui_ImplEquos_RenderDrawData(ImDrawData* draw_data) {
+    int fb_width = (int)(draw_data->DisplaySize.x * draw_data->FramebufferScale.x);
+    int fb_height = (int)(draw_data->DisplaySize.y * draw_data->FramebufferScale.y);
+    if (fb_width <= 0 || fb_height <= 0) return;
+
+    ImVec2 clip_off = draw_data->DisplayPos;
+    ImVec2 clip_scale = draw_data->FramebufferScale;
+
+    for (int n = 0; n < draw_data->CmdListsCount; n++) {
+        const ImDrawList* cmd_list = draw_data->CmdLists[n];
+        const ImDrawVert* vtx_buffer = cmd_list->VtxBuffer.Data;
+        const ImDrawIdx* idx_buffer = cmd_list->IdxBuffer.Data;
+
+        for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
+            const ImDrawCmd* pcmd = &cmd_list->CmdBuffer[cmd_i];
+            if (!pcmd->UserCallback) {
+                ImVec4 clip_rect;
+                clip_rect.x = (pcmd->ClipRect.x - clip_off.x) * clip_scale.x;
+                clip_rect.y = (pcmd->ClipRect.y - clip_off.y) * clip_scale.y;
+                clip_rect.z = (pcmd->ClipRect.z - clip_off.x) * clip_scale.x;
+                clip_rect.w = (pcmd->ClipRect.w - clip_off.y) * clip_scale.y;
+
+                if (clip_rect.x < fb_width && clip_rect.y < fb_height && clip_rect.z >= 0.0f && clip_rect.w >= 0.0f) {
+                    const SoftwareTexture* tex = (const SoftwareTexture*)pcmd->GetTexID();
+                    for (unsigned int idx = 0; idx < pcmd->ElemCount; idx += 3) {
+                        ImDrawIdx idx0 = idx_buffer[pcmd->IdxOffset + idx + 0];
+                        ImDrawIdx idx1 = idx_buffer[pcmd->IdxOffset + idx + 1];
+                        ImDrawIdx idx2 = idx_buffer[pcmd->IdxOffset + idx + 2];
+
+                        const ImDrawVert& v0 = vtx_buffer[pcmd->VtxOffset + idx0];
+                        const ImDrawVert& v1 = vtx_buffer[pcmd->VtxOffset + idx1];
+                        const ImDrawVert& v2 = vtx_buffer[pcmd->VtxOffset + idx2];
+
+                        draw_triangle_software(v0, v1, v2, tex, clip_rect);
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Обработка клавиатуры PS/2 под ImGui
+void ImGui_ImplEquos_HandleKey(uint16_t key) {
+    ImGuiIO& io = ImGui::GetIO();
+    uint8_t sc = key & 0xFF;
+    bool is_extended = (key & 0x100) != 0;
+
+    if (is_extended) {
+        switch (sc) {
+            case 0x48: io.AddKeyEvent(ImGuiKey_UpArrow, true); break;
+            case 0x50: io.AddKeyEvent(ImGuiKey_DownArrow, true); break;
+            case 0x4B: io.AddKeyEvent(ImGuiKey_LeftArrow, true); break;
+            case 0x4D: io.AddKeyEvent(ImGuiKey_RightArrow, true); break;
+        }
+    } else {
+        switch (sc) {
+            case 0x01: io.AddKeyEvent(ImGuiKey_Escape, true); break;
+            case 0x0E: io.AddKeyEvent(ImGuiKey_Backspace, true); break;
+            case 0x0F: io.AddKeyEvent(ImGuiKey_Tab, true); break;
+            case 0x1C: io.AddKeyEvent(ImGuiKey_Enter, true); break;
+            case 0x39: io.AddKeyEvent(ImGuiKey_Space, true); break;
+        }
+    }
 }
 
 int main(int argc, char **argv) {
@@ -205,24 +370,35 @@ int main(int argc, char **argv) {
   eid_init();
   memset(&eid_ctx, 0, sizeof(eid_ctx));
 
-  lua_State *L = luaL_newstate();
-  luaL_openlibs(L);
-  register_gui_api(L);
+  // --- ИНИЦИАЛИЗАЦИЯ DEAR IMGUI ---
+  IMGUI_CHECKVERSION();
+  ImGui::CreateContext();
+  ImGuiIO& io = ImGui::GetIO();
+  io.DisplaySize = ImVec2((float)screen_w, (float)screen_h);
 
-  lua_gc(L, LUA_GCSTOP, 0);
+  // Настройка стилей ImGui под "Liquid Glass" (темная стеклянная тема)
+  ImGuiStyle& style = ImGui::GetStyle();
+  style.WindowRounding = 12.0f;
+  style.FrameRounding  = 6.0f;
+  style.Colors[ImGuiCol_WindowBg]      = ImVec4(0.12f, 0.13f, 0.17f, 0.00f); // Полностью прозрачный фон (его размываем нашим Acrylic Blur)
+  style.Colors[ImGuiCol_TitleBg]        = ImVec4(0.12f, 0.13f, 0.17f, 0.40f);
+  style.Colors[ImGuiCol_TitleBgActive]  = ImVec4(0.12f, 0.13f, 0.17f, 0.60f);
+  style.Colors[ImGuiCol_Header]         = ImVec4(0.44f, 0.66f, 0.86f, 0.40f);
+  style.Colors[ImGuiCol_HeaderActive]   = ImVec4(0.44f, 0.66f, 0.86f, 0.80f);
+  style.Colors[ImGuiCol_Button]         = ImVec4(0.16f, 0.18f, 0.20f, 0.80f);
+  style.Colors[ImGuiCol_ButtonHovered]  = ImVec4(0.44f, 0.66f, 0.86f, 0.80f);
+  style.Colors[ImGuiCol_ButtonActive]   = ImVec4(0.12f, 0.13f, 0.17f, 0.90f);
 
-  if (luaL_dofile(L, "res/sysgui/init.lua")) {
-    const char *err_msg = lua_tostring(L, -1);
-    for (uint32_t i = 0; i < screen_w * screen_h; i++) backbuffer[i] = 0x550000;
-    eid_draw_text(backbuffer, screen_w, screen_h, 40, 50, "enGUI LUA SYNTAX ERROR", 0xFFFFFF);
-    eid_draw_text(backbuffer, screen_w, screen_h, 40, 80, err_msg, 0xFFFF00);
-    sysgui_mark_all_dirty();
-    copy_dirty_to_vram();
-    while (1) sys_sleep(1000);
-  }
-
-  lua_gc(L, LUA_GCCOLLECT, 0);
-  lua_gc(L, LUA_GCRESTART, 0);
+  // Сборка и генерация текстурного атласа шрифтов
+  unsigned char* font_pixels;
+  int font_width, font_height;
+  io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
+  
+  g_FontTexture.width = font_width;
+  g_FontTexture.height = font_height;
+  g_FontTexture.pixels = (uint32_t*)malloc(font_width * font_height * 4);
+  memcpy(g_FontTexture.pixels, font_pixels, font_width * font_height * 4);
+  io.Fonts->SetTexID((ImTextureID)&g_FontTexture);
 
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
@@ -236,11 +412,6 @@ int main(int argc, char **argv) {
   uint64_t last_fg = 0;
 
   while (1) {
-    // Audio pump: keep AC'97 ring topped up regardless of frame time.
-    // SYS_AUDIO_PLAY internally yields when ring "dist" > 8, so calling
-    // api_tick_audio() multiple times per loop is safe and self-throttling.
-    // Without this, at 1920x1080 a single audio chunk/frame drains faster
-    // than we refill it -> stutter/crackle.
     api_tick_audio();
     api_tick_audio();
     api_try_boot_sound();
@@ -320,46 +491,88 @@ int main(int argc, char **argv) {
                       (cur_my != last_my) || 
                       (cur_mdown != last_mdown) ||
                       (cur_key != 0) || 
-                      is_any_anim_active() || 
                       k_app_win_active ||  
-                      (now - last_tick >= 100);
+                      (now - last_tick >= 16); // ~60 FPS отрисовка
 
     if (need_redraw) {
       uint32_t elapsed = now - last_tick;
-      float dt = (float)(elapsed);
-      if (dt > 200.0f) dt = 200.0f;
+      float dt = (float)(elapsed) / 1000.0f;
+      if (dt > 0.2f) dt = 0.2f;
 
       sysgui_clear_dirty_grid();
       if (force_frames > 0) sysgui_mark_all_dirty();
 
-      eid_begin(&eid_ctx, backbuffer, screen_w, screen_h);
-      eid_ctx.mx = cur_mx; eid_ctx.my = cur_my;
-      eid_ctx.m_down = cur_mdown; eid_ctx.last_key = cur_key;
+      // Очистка / перерисовка красивого заднего фона (градиент)
+      eid_draw_gradient_rect(backbuffer, screen_w, screen_h, 0, 0, screen_w, screen_h, 0x1A2230, 0x080C14, true);
 
-      lua_getglobal(L, "on_tick");
-      if (lua_isfunction(L, -1)) {
-        lua_pushnumber(L, dt);
-        if (lua_pcall(L, 1, 0, 0) != LUA_OK) {
-          const char *err_msg = lua_tostring(L, -1);
-          for (uint32_t i = 0; i < screen_w * screen_h; i++) backbuffer[i] = 0x000088;
-          eid_draw_text(backbuffer, screen_w, screen_h, 40, 50, "enGUI LUA RUNTIME ERROR", 0xFFFFFF);
-          eid_draw_text(backbuffer, screen_w, screen_h, 40, 80, err_msg, 0xFFFF00);
-          sysgui_mark_all_dirty();
-          copy_dirty_to_vram();
-          while (1) sys_sleep(1000);
-        }
-      } else {
-        lua_pop(L, 1);
+      // Обновляем IO во фрейме ImGui
+      io.DeltaTime = dt > 0.0f ? dt : 0.001f;
+      io.MousePos = ImVec2((float)cur_mx, (float)cur_my);
+      io.MouseDown[0] = cur_mdown;
+
+      if (cur_key != 0) {
+          ImGui_ImplEquos_HandleKey(cur_key);
+          char c = eid_scancode_to_ascii(cur_key & 0xFF, false);
+          if (c >= 32 && c <= 126) {
+              io.AddInputCharacter(c);
+          }
       }
 
-      lua_getglobal(L, "needs_redraw");
-      if (lua_toboolean(L, -1)) force_frames = 2;
-      lua_pop(L, 1);
+      ImGui::NewFrame();
+
+      // --- НАШ ЛИКВИД ГЛАСС ДЕКСТОП / ИНТЕРФЕЙС НА DEAR IMGUI ---
+      ImGui::SetNextWindowSize(ImVec2(550, 380), ImGuiCond_FirstUseEver);
+      ImGui::SetNextWindowPos(ImVec2(150, 150), ImGuiCond_FirstUseEver);
+      
+      // Убираем фоновый рендер окна ImGui (ImGuiWindowFlags_NoBackground), чтобы нарисовать под ним наш блюр
+      ImGui::Begin("EquinoxOS Liquid Glass Panel", nullptr, ImGuiWindowFlags_NoBackground);
+      {
+          ImVec2 pos = ImGui::GetWindowPos();
+          ImVec2 size = ImGui::GetWindowSize();
+          
+          // Вызываем высокопроизводительный Acrylic Blur прямо на координатах этого окна!
+          draw_acrylic_blur((int)pos.x, (int)pos.y, (int)size.x, (int)size.y, 0.45f, 12, 0x141824);
+
+          ImGui::Text("Welcome to EquinoxOS Liquid Glass Interface!");
+          ImGui::Text("Core: C++ Engine | Rendering: ImGui Software Rasterizer");
+          ImGui::Separator();
+
+          static float anim_val = 0.0f;
+          ImGui::SliderFloat("Blur Intensity", &anim_val, 0.0f, 1.0f);
+
+          static bool show_perf = true;
+          ImGui::Checkbox("Show Performance Counters", &show_perf);
+
+          if (show_perf) {
+              ImGui::Text("Resolution: %dx%d @ 60FPS", screen_w, screen_h);
+              ImGui::Text("Allocated RAM: %llu MB", sys_get_used_mem() / (1024 * 1024));
+          }
+
+          ImGui::Spacing();
+          if (ImGui::Button("Play Audio Test (WAV)")) {
+              play_wav_file("res/sysgui/BOOTSOUND.wav");
+          }
+
+          ImGui::SameLine();
+          if (ImGui::Button("Clear Focus")) {
+              ImGui::ClearActiveID();
+          }
+      }
+      ImGui::End();
+
+      // Генерация геометрии
+      ImGui::Render();
+
+      // Отрисовка сгенерированных треугольников ImGui на наш backbuffer
+      ImGui_ImplEquos_RenderDrawData(ImGui::GetDrawData());
 
       sysgui_mark_dirty(last_mx, last_my, 8, 8);
       sysgui_mark_dirty(cur_mx, cur_my, 8, 8);
 
+      // Отрисовка аппаратного курсора мыши
       draw_cursor_user(backbuffer, cur_mx, cur_my, screen_w, screen_h);
+      
+      // Копирование dirty-тайлов во VRAM
       copy_dirty_to_vram();
 
       last_mx = cur_mx; last_my = cur_my;
@@ -371,9 +584,6 @@ int main(int argc, char **argv) {
     uint32_t frame_end = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
     uint32_t frame_elapsed = frame_end - frame_start;
 
-    // Стабильный фрейм-лимитер до 60 FPS + аудио-пампинг во время сна.
-    // Без пампинга при sys_sleep до 15 мс AC'97-кольцо успевает осушиться,
-    // и следующий кадр стартует уже с пустым ring -> шипение на 1920x1080.
     if (frame_elapsed < 16) {
       uint32_t to_sleep = 16 - frame_elapsed;
       while (to_sleep > 0) {
@@ -388,7 +598,7 @@ int main(int argc, char **argv) {
     frame_start = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
   }
 
-  lua_close(L);
+  ImGui::DestroyContext();
   free(backbuffer);
   if (dirty_grid) free(dirty_grid);
   return 0;
