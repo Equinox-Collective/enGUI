@@ -8,18 +8,21 @@
 #include <stdlib.h>
 #include <string.h>
 
+// Подключаем заголовки Dear ImGui
 #include "imgui/imgui.h"
 #include "imgui/imgui_internal.h"
-
-// Используем пространства имен для C++ контейнеров
-#include <vector>
-#include <string>
 
 uint32_t *vram = NULL;
 uint32_t *backbuffer = NULL;
 uint32_t *draw_target = NULL;
 uint32_t screen_w = 1920;
 uint32_t screen_h = 1080;
+
+int k_app_win_x = 100;
+int k_app_win_y = 100;
+int k_app_win_w = 640;
+int k_app_win_h = 400;
+bool k_app_win_active = false;
 
 #define TILE_SIZE 32
 static uint8_t *dirty_grid = NULL;
@@ -67,6 +70,7 @@ void sysgui_clear_dirty_grid(void) {
   }
 }
 
+// Высокопроизводительное SSE копирование
 static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
   if (((uintptr_t)dest & 15) == 0 && ((uintptr_t)src & 15) == 0 && (bytes % 16) == 0) {
     size_t blocks = bytes / 64;
@@ -129,9 +133,25 @@ void copy_dirty_to_vram(void) {
           int pixel_y = r * TILE_SIZE + line;
           if (pixel_y >= (int)screen_h) break;
 
-          uint32_t *src = &backbuffer[pixel_y * screen_w + x];
-          uint32_t *dst = &vram[pixel_y * screen_w + x];
-          fast_memcpy_sse(dst, src, width_pixels * 4);
+          if (k_app_win_active && pixel_y >= k_app_win_y && pixel_y < k_app_win_y + k_app_win_h) {
+              int left_copy_w = k_app_win_x - x;
+              if (left_copy_w > width_pixels) left_copy_w = width_pixels;
+              if (left_copy_w > 0) {
+                  memcpy(&vram[pixel_y * screen_w + x], &backbuffer[pixel_y * screen_w + x], left_copy_w * 4);
+              }
+              int right_start_x = k_app_win_x + k_app_win_w;
+              int right_copy_offset = right_start_x - x;
+              if (right_copy_offset < width_pixels) {
+                  int right_copy_w = width_pixels - right_copy_offset;
+                  if (right_copy_w > 0) {
+                      memcpy(&vram[pixel_y * screen_w + right_start_x], &backbuffer[pixel_y * screen_w + right_start_x], right_copy_w * 4);
+                  }
+              }
+          } else {
+              uint32_t *src = &backbuffer[pixel_y * screen_w + x];
+              uint32_t *dst = &vram[pixel_y * screen_w + x];
+              fast_memcpy_sse(dst, src, width_pixels * 4);
+          }
         }
       } else {
         c++;
@@ -139,6 +159,8 @@ void copy_dirty_to_vram(void) {
     }
   }
 }
+
+eid_ctx_t eid_ctx;
 
 void draw_cursor_user(uint32_t *fb, int x, int y, int w, int h) {
   static const int cursor_map[8][8] = {
@@ -170,7 +192,7 @@ static inline float edgeFunction(const ImVec2& a, const ImVec2& b, const ImVec2&
     return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
 }
 
-// Высокопроизводительный линейный растеризатор
+// Функция отрисовки текстурированных / цветных треугольников ImGui
 void draw_triangle_software(const ImDrawVert& v0, const ImDrawVert& v1, const ImDrawVert& v2, 
                             const SoftwareTexture* tex, const ImVec4& clip_rect) {
     float min_x = ImMin(v0.pos.x, ImMin(v1.pos.x, v2.pos.x));
@@ -201,47 +223,31 @@ void draw_triangle_software(const ImDrawVert& v0, const ImDrawVert& v1, const Im
     ImVec4 c1 = unpack_color(v1.col);
     ImVec4 c2 = unpack_color(v2.col);
 
-    float dy12 = v1.pos.y - v2.pos.y;
-    float dx21 = v2.pos.x - v1.pos.x;
-    float c12 = v1.pos.x * v2.pos.y - v2.pos.x * v1.pos.y;
-
-    float dy20 = v2.pos.y - v0.pos.y;
-    float dx02 = v0.pos.x - v2.pos.x;
-    float c20 = v2.pos.x * v0.pos.y - v0.pos.x * v2.pos.y;
-
     for (int y = y_start; y <= y_end; y++) {
         uint32_t* row = &draw_target[y * screen_w];
-        float fy = (float)y + 0.5f;
-
         for (int x = x_start; x <= x_end; x++) {
-            float fx = (float)x + 0.5f;
-
-            float w0 = fx * dy12 + fy * dx21 + c12;
-            float w1 = fx * dy20 + fy * dx02 + c20;
-
-            if (area < 0) {
-                if (w0 > 0.0f || w1 > 0.0f) continue;
-            } else {
-                if (w0 < 0.0f || w1 < 0.0f) continue;
-            }
-
-            float w0_norm = w0 * inv_area;
-            float w1_norm = w1 * inv_area;
-            float w2_norm = 1.0f - w0_norm - w1_norm;
+            ImVec2 p((float)x + 0.5f, (float)y + 0.5f);
+            float w0 = edgeFunction(v1.pos, v2.pos, p);
+            float w1 = edgeFunction(v2.pos, v0.pos, p);
+            float w2 = edgeFunction(v0.pos, v1.pos, p);
 
             if (area < 0) {
-                if (w2_norm > 0.0f) continue;
+                if (w0 > 0 || w1 > 0 || w2 > 0) continue;
             } else {
-                if (w2_norm < 0.0f) continue;
+                if (w0 < 0 || w1 < 0 || w2 < 0) continue;
             }
 
-            float u = w0_norm * v0.uv.x + w1_norm * v1.uv.x + w2_norm * v2.uv.x;
-            float v = w0_norm * v0.uv.y + w1_norm * v1.uv.y + w2_norm * v2.uv.y;
+            w0 *= inv_area;
+            w1 *= inv_area;
+            float w2_norm = 1.0f - w0 - w1;
 
-            float r = w0_norm * c0.x + w1_norm * c1.x + w2_norm * c2.x;
-            float g = w0_norm * c0.y + w1_norm * c1.y + w2_norm * c2.y;
-            float b = w0_norm * c0.z + w1_norm * c1.z + w2_norm * c2.z;
-            float a = w0_norm * c0.w + w1_norm * c1.w + w2_norm * c2.w;
+            float u = w0 * v0.uv.x + w1 * v1.uv.x + w2_norm * v2.uv.x;
+            float v = w0 * v0.uv.y + w1 * v1.uv.y + w2_norm * v2.uv.y;
+
+            float r = w0 * c0.x + w1 * c1.x + w2_norm * c2.x;
+            float g = w0 * c0.y + w1 * c1.y + w2_norm * c2.y;
+            float b = w0 * c0.z + w1 * c1.z + w2_norm * c2.z;
+            float a = w0 * c0.w + w1 * c1.w + w2_norm * c2.w;
 
             if (tex) {
                 int tx = (int)(u * (tex->width - 1));
@@ -270,10 +276,9 @@ void draw_triangle_software(const ImDrawVert& v0, const ImDrawVert& v1, const Im
                 int bg_g = (bg >> 8) & 0xFF;
                 int bg_b = (bg >> 16) & 0xFF;
 
-                float alpha_f = a / 255.0f;
-                int out_r = (int)(r * alpha_f + bg_r * (1.0f - alpha_f));
-                int out_g = (int)(g * alpha_f + bg_g * (1.0f - alpha_f));
-                int out_b = (int)(b * alpha_f + bg_b * (1.0f - alpha_f));
+                int out_r = (int)((r * a + bg_r * (255.0f - a)) / 255.0f);
+                int out_g = (int)((g * a + bg_g * (255.0f - a)) / 255.0f);
+                int out_b = (int)((b * a + bg_b * (255.0f - a)) / 255.0f);
 
                 row[x] = out_r | (out_g << 8) | (out_b << 16);
             }
@@ -322,6 +327,7 @@ void ImGui_ImplEquos_RenderDrawData(ImDrawData* draw_data) {
     }
 }
 
+// Обработка клавиатуры PS/2 под ImGui
 void ImGui_ImplEquos_HandleKey(uint16_t key) {
     ImGuiIO& io = ImGui::GetIO();
     uint8_t sc = key & 0xFF;
@@ -345,171 +351,9 @@ void ImGui_ImplEquos_HandleKey(uint16_t key) {
     }
 }
 
-// --- СОСТОЯНИЕ НАШИХ ПЯТИ НАТИВНЫХ ПРИЛОЖЕНИЙ ---
-static bool show_terminal = true;
-static bool show_monitor  = false;
-static bool show_paint    = false;
-static bool show_explorer = false;
-static bool show_notepad  = false;
-
-// Отрисовка Терминала
-void draw_app_terminal() {
-    if (!show_terminal) return;
-    ImGui::SetNextWindowSize(ImVec2(520, 340), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Equinox Terminal", &show_terminal, ImGuiWindowFlags_NoBackground);
-    
-    ImVec2 pos = ImGui::GetWindowPos(); ImVec2 size = ImGui::GetWindowSize();
-    draw_acrylic_blur((int)pos.x, (int)pos.y, (int)size.x, (int)size.y, 0.40f, 12, 0x151821);
-
-    static std::vector<std::string> lines = {
-        "EquinoxOS - Pure C++ Interactive Terminal",
-        "Type 'help' to see local shell commands.",
-        ""
-    };
-    static char input_buf[128] = "";
-
-    ImGui::BeginChild("ScrollingRegion", ImVec2(0, -ImGui::GetFrameHeightWithSpacing()), false, ImGuiWindowFlags_HorizontalScrollbar);
-    for (const auto& line : lines) {
-        ImGui::TextColored(ImVec4(0.60f, 0.76f, 0.47f, 1.00f), "%s", line.c_str());
-    }
-    ImGui::EndChild();
-
-    ImGui::PushItemWidth(-1);
-    if (ImGui::InputText("##Input", input_buf, IM_ARRAYSIZE(input_buf), ImGuiInputTextFlags_EnterReturnsTrue)) {
-        std::string cmd(input_buf);
-        lines.push_back(">> " + cmd);
-        
-        if (cmd == "help") {
-            lines.push_back("Local GUI Commands:");
-            lines.push_back("  neofetch      Display logo and hardware specs");
-            lines.push_back("  clear         Reset terminal logs");
-            lines.push_back("  ps            Task manager dump");
-            lines.push_back("  doom          Launch Doom natively");
-        } else if (cmd == "neofetch") {
-            lines.push_back("  #######   Equinox OS C++ Sonoma");
-            lines.push_back(" #######    -----------------");
-            lines.push_back(" ##         Renderer: Dear ImGui Software CPU Mode");
-            lines.push_back(" ##         Memory: 512 MB");
-        } else if (cmd == "clear") {
-            lines.clear();
-        } else if (cmd == "ps") {
-            lines.push_back("Active processes:");
-            lines.push_back("PID 1 - Kernel System Thread");
-            lines.push_back("PID 2 - sysgui Display Compositor");
-        } else if (cmd == "doom") {
-            sys_exec("bin/doom.elf -iwad res/doom1.wad");
-            lines.push_back("Spawning DOOM on active frame...");
-        } else {
-            lines.push_back("Executing system bridge: " + cmd);
-        }
-        input_buf[0] = '\0';
-    }
-    ImGui::PopItemWidth();
-    ImGui::End();
-}
-
-// Отрисовка Монитора ресурсов
-void draw_app_monitor() {
-    if (!show_monitor) return;
-    ImGui::SetNextWindowSize(ImVec2(340, 220), ImGuiCond_FirstUseEver);
-    ImGui::Begin("System Monitor", &show_monitor, ImGuiWindowFlags_NoBackground);
-    
-    ImVec2 pos = ImGui::GetWindowPos(); ImVec2 size = ImGui::GetWindowSize();
-    draw_acrylic_blur((int)pos.x, (int)pos.y, (int)size.x, (int)size.y, 0.40f, 12, 0x1A102E);
-
-    uint64_t used = sys_get_used_mem();
-    uint64_t total = sys_get_total_mem();
-    float ram_ratio = total > 0 ? (float)used / (float)total : 0.0f;
-
-    ImGui::Text("RAM Allocation Progress:");
-    ImGui::ProgressBar(ram_ratio, ImVec2(0.f, 0.f));
-    ImGui::Text("Used: %llu MB / %llu MB", used / (1024 * 1024), total / (1024 * 1024));
-
-    static float values[50] = {};
-    static int values_offset = 0;
-    values[values_offset] = ram_ratio * 100.0f;
-    values_offset = (values_offset + 1) % IM_ARRAYSIZE(values);
-
-    ImGui::PlotLines("History", values, IM_ARRAYSIZE(values), values_offset, "RAM Usage %", 0.0f, 100.0f, ImVec2(0, 70.0f));
-    ImGui::End();
-}
-
-// Отрисовка Paint
-void draw_app_paint() {
-    if (!show_paint) return;
-    ImGui::SetNextWindowSize(ImVec2(440, 320), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Vector Paint Brush", &show_paint, ImGuiWindowFlags_NoBackground);
-
-    ImVec2 pos = ImGui::GetWindowPos(); ImVec2 size = ImGui::GetWindowSize();
-    draw_acrylic_blur((int)pos.x, (int)pos.y, (int)size.x, (int)size.y, 0.40f, 12, 0x22121A);
-
-    static ImVector<ImVec2> points;
-    static ImVec4 brush_color(1.0f, 1.0f, 1.0f, 1.0f);
-
-    ImGui::ColorEdit4("Color", &brush_color.x, ImGuiColorEditFlags_NoInputs);
-    ImGui::SameLine();
-    if (ImGui::Button("Clear Canvas")) { points.clear(); }
-
-    ImGui::Separator();
-    
-    ImDrawList* draw_list = ImGui::GetWindowDrawList();
-    ImVec2 canvas_pos = ImGui::GetCursorScreenPos();
-    ImVec2 canvas_size = ImGui::GetContentRegionAvail();
-
-    draw_list->AddRectFilled(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y), IM_COL32(20, 20, 20, 200));
-
-    if (ImGui::IsMouseHoveringRect(canvas_pos, ImVec2(canvas_pos.x + canvas_size.x, canvas_pos.y + canvas_size.y))) {
-        if (ImGui::IsMouseDown(ImGuiMouseButton_Left)) {
-            points.push_back(ImGui::GetIO().MousePos);
-        }
-    }
-
-    for (int i = 1; i < points.Size; i++) {
-        draw_list->AddLine(points[i - 1], points[i], ImGui::ColorConvertFloat4ToU32(brush_color), 3.0f);
-    }
-
-    ImGui::End();
-}
-
-// Отрисовка Проводника (VFS Explorer)
-void draw_app_explorer() {
-    if (!show_explorer) return;
-    ImGui::SetNextWindowSize(ImVec2(360, 280), ImGuiCond_FirstUseEver);
-    ImGui::Begin("VFS File Explorer", &show_explorer, ImGuiWindowFlags_NoBackground);
-
-    ImVec2 pos = ImGui::GetWindowPos(); ImVec2 size = ImGui::GetWindowSize();
-    draw_acrylic_blur((int)pos.x, (int)pos.y, (int)size.x, (int)size.y, 0.40f, 12, 0x12221A);
-
-    ImGui::Text("Directory contents: /");
-    ImGui::Separator();
-
-    static const char* mock_files[] = { "README.md", "sysgui.elf", "BOOTSOUND.wav", "desktop.cfg", "kernel.elf" };
-    for (int i = 0; i < 5; i++) {
-        if (ImGui::Selectable(mock_files[i])) {
-            show_notepad = true;
-        }
-    }
-    ImGui::End();
-}
-
-// Отрисовка Блокнота
-void draw_app_notepad() {
-    if (!show_notepad) return;
-    ImGui::SetNextWindowSize(ImVec2(420, 280), ImGuiCond_FirstUseEver);
-    ImGui::Begin("Notepad Text Editor", &show_notepad, ImGuiWindowFlags_NoBackground);
-
-    ImVec2 pos = ImGui::GetWindowPos(); ImVec2 size = ImGui::GetWindowSize();
-    draw_acrylic_blur((int)pos.x, (int)pos.y, (int)size.x, (int)size.y, 0.40f, 12, 0x1A1B28);
-
-    static char text[1024] = "This is a freestanding C++ text editor running on EquinoxOS!\nYou can edit this text area.";
-    ImGui::InputTextMultiline("##source", text, IM_ARRAYSIZE(text), ImVec2(-1.0f, -1.0f), ImGuiInputTextFlags_AllowTabInput);
-    ImGui::End();
-}
-
 int main(int argc, char **argv) {
   uint64_t phys_fb = 0; uint64_t width = 0; uint64_t height = 0; uint64_t pitch = 0;
 
-  // Системный вызов VESA Info
   __asm__ volatile("mov $32, %%rax\n"
                    "int $0x80\n"
                    : "=a"(phys_fb), "=b"(width), "=c"(height), "=d"(pitch));
@@ -715,76 +559,6 @@ int main(int argc, char **argv) {
           }
       }
       ImGui::End();
-
-      // Рендерим остальные приложения, если они активны
-      draw_app_terminal();
-      draw_app_monitor();
-      draw_app_paint();
-      draw_app_explorer();
-      draw_app_notepad();
-
-      // Рисуем macOS-style Dock внизу экрана
-      {
-          float dock_h = 56.0f;
-          float icon_size_base = 42.0f;
-          float gap = 12.0f;
-          int total_icons = 6;
-          float dock_w = total_icons * (icon_size_base + gap) + gap;
-          float dock_x = (screen_w - dock_w) / 2.0f;
-          float dock_y = screen_h - dock_h - 12.0f;
-
-          draw_acrylic_blur((int)dock_x, (int)dock_y, (int)dock_w, (int)dock_h, 0.45f, 14, 0x151821);
-
-          struct DockItem {
-              const char* name;
-              bool* state;
-              uint32_t col;
-          };
-          DockItem items[] = {
-              {"Term", &show_terminal, 0xFF3E84F7},
-              {"Mon", &show_monitor, 0xFF7C51F9},
-              {"Paint", &show_paint, 0xFFE06C75},
-              {"Exp", &show_explorer, 0xFFE5C07B},
-              {"Note", &show_notepad, 0xFF98C379},
-              {"Doom", nullptr, 0xFFD19A66}
-          };
-
-          for (int i = 0; i < total_icons; i++) {
-              float base_cx = dock_x + gap + i * (icon_size_base + gap) + icon_size_base / 2.0f;
-              float dist_x = ImFabs((float)cur_mx - base_cx);
-              
-              // Magnification эффект (увеличение при наведении)
-              float scale = 1.0f;
-              if (cur_my >= dock_y - 15.0f && cur_my <= screen_h && dist_x < 80.0f) {
-                  scale = 1.0f + (1.0f - (dist_x / 80.0f)) * 0.35f;
-              }
-
-              float size = icon_size_base * scale;
-              float ix = base_cx - size / 2.0f;
-              float iy = dock_y + (dock_h - size) / 2.0f;
-
-              bool hovered = (cur_mx >= ix && cur_mx < ix + size && cur_my >= iy && cur_my < iy + size);
-
-              // Рисуем иконку
-              uint32_t bg_col = hovered ? 0xFF3E4451 : 0xFF21252B;
-              eid_draw_rect(backbuffer, screen_w, screen_h, (int)ix, (int)iy, (int)size, (int)size, bg_col);
-              eid_draw_rect(backbuffer, screen_w, screen_h, (int)ix + 2, (int)iy + 2, (int)size - 4, (int)size - 4, items[i].col);
-
-              // Точка-индикатор запущенного приложения внизу дока
-              if (items[i].state && *(items[i].state)) {
-                  eid_draw_rect(backbuffer, screen_w, screen_h, (int)base_cx - 2, (int)(screen_h - 16), 4, 2, 0xFFFFFF);
-              }
-
-              // Обработка клика
-              if (hovered && cur_mdown && last_mdown == 0) {
-                  if (items[i].state) {
-                      *(items[i].state) = !(*(items[i].state));
-                  } else {
-                      sys_exec("bin/doom.elf -iwad res/doom1.wad");
-                  }
-              }
-          }
-      }
 
       // Генерация геометрии
       ImGui::Render();
