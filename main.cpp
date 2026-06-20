@@ -375,6 +375,7 @@ int main(int argc, char **argv) {
 
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
+  uint16_t last_key = 0;
   uint32_t force_frames = 4;
   bool start_menu_open = false;
 
