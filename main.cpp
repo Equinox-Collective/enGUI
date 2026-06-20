@@ -1,14 +1,16 @@
 #include "api_gui.h"
+#include "gui/desktop.h"
+#include "gui/panel.h"
+#include "gui/dock.h"
+#include "gui/win_manager.h"
 #include <eid.h>
 #include <eid_ext.h>
 #include <equos.h>
 #include <stdbool.h>
 #include <stdint.h>
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-// Подключаем заголовки Dear ImGui
 #include "imgui/imgui.h"
 #include "imgui/imgui_internal.h"
 
@@ -17,12 +19,6 @@ uint32_t *backbuffer = NULL;
 uint32_t *draw_target = NULL;
 uint32_t screen_w = 1920;
 uint32_t screen_h = 1080;
-
-int k_app_win_x = 100;
-int k_app_win_y = 100;
-int k_app_win_w = 640;
-int k_app_win_h = 400;
-bool k_app_win_active = false;
 
 #define TILE_SIZE 32
 static uint8_t *dirty_grid = NULL;
@@ -70,7 +66,6 @@ void sysgui_clear_dirty_grid(void) {
   }
 }
 
-// Высокопроизводительное SSE копирование
 static inline void fast_memcpy_sse(void *dest, const void *src, size_t bytes) {
   if (((uintptr_t)dest & 15) == 0 && ((uintptr_t)src & 15) == 0 && (bytes % 16) == 0) {
     size_t blocks = bytes / 64;
@@ -133,25 +128,9 @@ void copy_dirty_to_vram(void) {
           int pixel_y = r * TILE_SIZE + line;
           if (pixel_y >= (int)screen_h) break;
 
-          if (k_app_win_active && pixel_y >= k_app_win_y && pixel_y < k_app_win_y + k_app_win_h) {
-              int left_copy_w = k_app_win_x - x;
-              if (left_copy_w > width_pixels) left_copy_w = width_pixels;
-              if (left_copy_w > 0) {
-                  memcpy(&vram[pixel_y * screen_w + x], &backbuffer[pixel_y * screen_w + x], left_copy_w * 4);
-              }
-              int right_start_x = k_app_win_x + k_app_win_w;
-              int right_copy_offset = right_start_x - x;
-              if (right_copy_offset < width_pixels) {
-                  int right_copy_w = width_pixels - right_copy_offset;
-                  if (right_copy_w > 0) {
-                      memcpy(&vram[pixel_y * screen_w + right_start_x], &backbuffer[pixel_y * screen_w + right_start_x], right_copy_w * 4);
-                  }
-              }
-          } else {
-              uint32_t *src = &backbuffer[pixel_y * screen_w + x];
-              uint32_t *dst = &vram[pixel_y * screen_w + x];
-              fast_memcpy_sse(dst, src, width_pixels * 4);
-          }
+          uint32_t *src = &backbuffer[pixel_y * screen_w + x];
+          uint32_t *dst = &vram[pixel_y * screen_w + x];
+          fast_memcpy_sse(dst, src, width_pixels * 4);
         }
       } else {
         c++;
@@ -159,8 +138,6 @@ void copy_dirty_to_vram(void) {
     }
   }
 }
-
-eid_ctx_t eid_ctx;
 
 void draw_cursor_user(uint32_t *fb, int x, int y, int w, int h) {
   static const int cursor_map[8][8] = {
@@ -179,7 +156,7 @@ void draw_cursor_user(uint32_t *fb, int x, int y, int w, int h) {
   }
 }
 
-// --- СТРУКТУРА ТЕКСТУРЫ И ПРОГРАММНЫЙ РАСТЕРИЗАТОР DEAR IMGUI ---
+// --- ПРОГРАММНЫЙ РАСТЕРИЗАТОР DEAR IMGUI ---
 struct SoftwareTexture {
     uint32_t* pixels;
     int width;
@@ -192,7 +169,6 @@ static inline float edgeFunction(const ImVec2& a, const ImVec2& b, const ImVec2&
     return (c.x - a.x) * (b.y - a.y) - (c.y - a.y) * (b.x - a.x);
 }
 
-// Функция отрисовки текстурированных / цветных треугольников ImGui
 void draw_triangle_software(const ImDrawVert& v0, const ImDrawVert& v1, const ImDrawVert& v2, 
                             const SoftwareTexture* tex, const ImVec4& clip_rect) {
     float min_x = ImMin(v0.pos.x, ImMin(v1.pos.x, v2.pos.x));
@@ -327,7 +303,6 @@ void ImGui_ImplEquos_RenderDrawData(ImDrawData* draw_data) {
     }
 }
 
-// Обработка клавиатуры PS/2 под ImGui
 void ImGui_ImplEquos_HandleKey(uint16_t key) {
     ImGuiIO& io = ImGui::GetIO();
     uint8_t sc = key & 0xFF;
@@ -352,6 +327,7 @@ void ImGui_ImplEquos_HandleKey(uint16_t key) {
 }
 
 int main(int argc, char **argv) {
+  (void)argc; (void)argv;
   uint64_t phys_fb = 0; uint64_t width = 0; uint64_t height = 0; uint64_t pitch = 0;
 
   __asm__ volatile("mov $32, %%rax\n"
@@ -367,29 +343,26 @@ int main(int argc, char **argv) {
   draw_target = backbuffer;
 
   sysgui_init_dirty_grid();
-  eid_init();
-  memset(&eid_ctx, 0, sizeof(eid_ctx));
 
-  // --- ИНИЦИАЛИЗАЦИЯ DEAR IMGUI ---
+  // --- ИНИЦИАЛИЗАЦИЯ И СЕТАП МОДУЛЕЙ GUI ---
+  GUI::InitDesktop();
+  GUI::InitDock();
+  GUI::InitWindowManager();
+
+  // ИНИЦИАЛИЗАЦИЯ DEAR IMGUI
   IMGUI_CHECKVERSION();
   ImGui::CreateContext();
   ImGuiIO& io = ImGui::GetIO();
   io.DisplaySize = ImVec2((float)screen_w, (float)screen_h);
 
-  // Настройка стилей ImGui под "Liquid Glass" (темная стеклянная тема)
+  // Стили ImGui под стеклянное скругление macOS
   ImGuiStyle& style = ImGui::GetStyle();
   style.WindowRounding = 12.0f;
   style.FrameRounding  = 6.0f;
-  style.Colors[ImGuiCol_WindowBg]      = ImVec4(0.12f, 0.13f, 0.17f, 0.00f); // Полностью прозрачный фон (его размываем нашим Acrylic Blur)
-  style.Colors[ImGuiCol_TitleBg]        = ImVec4(0.12f, 0.13f, 0.17f, 0.40f);
-  style.Colors[ImGuiCol_TitleBgActive]  = ImVec4(0.12f, 0.13f, 0.17f, 0.60f);
-  style.Colors[ImGuiCol_Header]         = ImVec4(0.44f, 0.66f, 0.86f, 0.40f);
-  style.Colors[ImGuiCol_HeaderActive]   = ImVec4(0.44f, 0.66f, 0.86f, 0.80f);
-  style.Colors[ImGuiCol_Button]         = ImVec4(0.16f, 0.18f, 0.20f, 0.80f);
-  style.Colors[ImGuiCol_ButtonHovered]  = ImVec4(0.44f, 0.66f, 0.86f, 0.80f);
-  style.Colors[ImGuiCol_ButtonActive]   = ImVec4(0.12f, 0.13f, 0.17f, 0.90f);
+  style.Colors[ImGuiCol_WindowBg]      = ImVec4(0.12f, 0.14f, 0.18f, 0.00f); // Окна прозрачны (бэкграунд размывает Акрил)
+  style.Colors[ImGuiCol_TitleBg]        = ImVec4(0.12f, 0.14f, 0.18f, 0.40f);
+  style.Colors[ImGuiCol_TitleBgActive]  = ImVec4(0.12f, 0.14f, 0.18f, 0.60f);
 
-  // Сборка и генерация текстурного атласа шрифтов
   unsigned char* font_pixels;
   int font_width, font_height;
   io.Fonts->GetTexDataAsRGBA32(&font_pixels, &font_width, &font_height);
@@ -402,70 +375,17 @@ int main(int argc, char **argv) {
 
   int last_mx = -9999, last_my = -9999;
   int last_mdown = -1;
-  uint16_t last_key = 0;
   uint32_t force_frames = 4;
+  bool start_menu_open = false;
 
   api_preload_boot_sound();
 
   uint32_t last_tick = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
   uint32_t frame_start = last_tick;
-  uint64_t last_fg = 0;
 
   while (1) {
     api_tick_audio();
-    api_tick_audio();
     api_try_boot_sound();
-
-    uint64_t fg = _syscall(74, 0, 0, 0, 0, 0);
-    if (fg == 74) fg = 0;
-
-    if (fg != 0) {
-      last_fg = fg;
-      {
-        uint64_t cmx = 0, cmy = 0;
-        __asm__ volatile("mov $7, %%rax\n int $0x80" : "=a"(cmx), "=b"(cmy));
-        static uint32_t cursor_save[8 * 8];
-        static int cursor_last_x = -1, cursor_last_y = -1;
-        static bool cursor_saved = false;
-        int cx = (int)cmx, cy = (int)cmy;
-
-        if (cx != cursor_last_x || cy != cursor_last_y) {
-          if (cursor_saved && cursor_last_x >= 0 && cursor_last_y >= 0) {
-            for (int i = 0; i < 8; i++) {
-              int py = cursor_last_y + i;
-              if (py < 0 || py >= (int)screen_h) continue;
-              for (int j = 0; j < 8; j++) {
-                int px = cursor_last_x + j;
-                if (px < 0 || px >= (int)screen_w) continue;
-                vram[py * screen_w + px] = cursor_save[i * 8 + j];
-              }
-            }
-          }
-          for (int i = 0; i < 8; i++) {
-            int py = cy + i;
-            for (int j = 0; j < 8; j++) {
-              int px = cx + j;
-              if (py >= 0 && py < (int)screen_h && px >= 0 && px < (int)screen_w) {
-                cursor_save[i * 8 + j] = vram[py * screen_w + px];
-              } else {
-                cursor_save[i * 8 + j] = 0;
-              }
-            }
-          }
-          cursor_saved = true;
-          draw_cursor_user(vram, cx, cy, screen_w, screen_h);
-          cursor_last_x = cx; cursor_last_y = cy;
-        }
-      }
-      sys_sleep(1);
-      frame_start = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
-      continue;
-    }
-
-    if (last_fg != 0) {
-      force_frames = 4;
-      last_fg = 0;
-    }
 
     uint64_t mx = 0, my = 0, m_btn = 0;
     __asm__ volatile("mov $7, %%rax\n int $0x80" : "=a"(mx), "=b"(my), "=c"(m_btn));
@@ -491,8 +411,7 @@ int main(int argc, char **argv) {
                       (cur_my != last_my) || 
                       (cur_mdown != last_mdown) ||
                       (cur_key != 0) || 
-                      k_app_win_active ||  
-                      (now - last_tick >= 16); // ~60 FPS отрисовка
+                      (now - last_tick >= 16);
 
     if (need_redraw) {
       uint32_t elapsed = now - last_tick;
@@ -502,77 +421,72 @@ int main(int argc, char **argv) {
       sysgui_clear_dirty_grid();
       if (force_frames > 0) sysgui_mark_all_dirty();
 
-      // Очистка / перерисовка красивого заднего фона (градиент)
-      eid_draw_gradient_rect(backbuffer, screen_w, screen_h, 0, 0, screen_w, screen_h, 0x1A2230, 0x080C14, true);
+      // Обновляем состояние Desktop
+      GUI::UpdateDesktop(dt, cur_mx, cur_my, cur_mdown, cur_key);
 
-      // Обновляем IO во фрейме ImGui
-      io.DeltaTime = dt > 0.0f ? dt : 0.001f;
-      io.MousePos = ImVec2((float)cur_mx, (float)cur_my);
-      io.MouseDown[0] = cur_mdown;
+      // Шаг 1: Рендерим обои / скринсейвер
+      GUI::RenderDesktop();
 
-      if (cur_key != 0) {
-          ImGui_ImplEquos_HandleKey(cur_key);
-          char c = eid_scancode_to_ascii(cur_key & 0xFF, false);
-          if (c >= 32 && c <= 126) {
-              io.AddInputCharacter(c);
+      if (!GUI::IsScreensaverActive()) {
+          // Инициализируем кадр ImGui
+          io.DeltaTime = dt > 0.0f ? dt : 0.001f;
+          io.MousePos = ImVec2((float)cur_mx, (float)cur_my);
+          io.MouseDown[0] = cur_mdown;
+
+          if (cur_key != 0) {
+              ImGui_ImplEquos_HandleKey(cur_key);
+              char c = eid_scancode_to_ascii(cur_key & 0xFF, false);
+              if (c >= 32 && c <= 126) {
+                  io.AddInputCharacter(c);
+              }
           }
+
+          ImGui::NewFrame();
+
+          // Шаг 2: Отрисовка всех C++ окон
+          GUI::RenderWindows(cur_mx, cur_my, cur_mdown, dt);
+
+          // Шаг 3: Меню "EQ" (Системное выпадающее меню)
+          if (start_menu_open) {
+              ImGui::SetNextWindowPos(ImVec2(10, 28));
+              ImGui::SetNextWindowSize(ImVec2(240, 120));
+              ImGui::Begin("AppleMenu", &start_menu_open, ImGuiWindowFlags_NoDecoration);
+              {
+                  ImVec2 pos = ImGui::GetWindowPos();
+                  ImVec2 size = ImGui::GetWindowSize();
+                  draw_acrylic_blur((int)pos.x, (int)pos.y, (int)size.x, (int)size.y, 0.65f, 10, 0x1E222B);
+
+                  if (ImGui::Button("Switch Sonoma Theme", ImVec2(220, 24))) {
+                      GUI::NextTheme();
+                      start_menu_open = false;
+                  }
+                  if (ImGui::Button("Open Terminal Console", ImVec2(220, 24))) {
+                      GUI::OpenAppWindow("Terminal Console");
+                      start_menu_open = false;
+                  }
+                  ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1.0f), "  Active Tasks: %d", (int)_syscall(70, 0, 0, 0, 0, 0));
+              }
+              ImGui::End();
+          }
+
+          // Шаг 4: Верхняя строка панелей меню (Panel)
+          GUI::RenderTopPanel(start_menu_open);
+
+          // Шаг 5: Док-панель macOS-Style
+          GUI::RenderDock(cur_mx, cur_my, cur_mdown);
+
+          // Рендерим и собираем геометрию ImGui в буфер
+          ImGui::Render();
+          ImGui_ImplEquos_RenderDrawData(ImGui::GetDrawData());
       }
-
-      ImGui::NewFrame();
-
-      // --- НАШ ЛИКВИД ГЛАСС ДЕКСТОП / ИНТЕРФЕЙС НА DEAR IMGUI ---
-      ImGui::SetNextWindowSize(ImVec2(550, 380), ImGuiCond_FirstUseEver);
-      ImGui::SetNextWindowPos(ImVec2(150, 150), ImGuiCond_FirstUseEver);
-      
-      // Убираем фоновый рендер окна ImGui (ImGuiWindowFlags_NoBackground), чтобы нарисовать под ним наш блюр
-      ImGui::Begin("EquinoxOS Liquid Glass Panel", nullptr, ImGuiWindowFlags_NoBackground);
-      {
-          ImVec2 pos = ImGui::GetWindowPos();
-          ImVec2 size = ImGui::GetWindowSize();
-          
-          // Вызываем высокопроизводительный Acrylic Blur прямо на координатах этого окна!
-          draw_acrylic_blur((int)pos.x, (int)pos.y, (int)size.x, (int)size.y, 0.45f, 12, 0x141824);
-
-          ImGui::Text("Welcome to EquinoxOS Liquid Glass Interface!");
-          ImGui::Text("Core: C++ Engine | Rendering: ImGui Software Rasterizer");
-          ImGui::Separator();
-
-          static float anim_val = 0.0f;
-          ImGui::SliderFloat("Blur Intensity", &anim_val, 0.0f, 1.0f);
-
-          static bool show_perf = true;
-          ImGui::Checkbox("Show Performance Counters", &show_perf);
-
-          if (show_perf) {
-              ImGui::Text("Resolution: %dx%d @ 60FPS", screen_w, screen_h);
-              ImGui::Text("Allocated RAM: %llu MB", sys_get_used_mem() / (1024 * 1024));
-          }
-
-          ImGui::Spacing();
-          if (ImGui::Button("Play Audio Test (WAV)")) {
-              play_wav_file("res/sysgui/BOOTSOUND.wav");
-          }
-
-          ImGui::SameLine();
-          if (ImGui::Button("Clear Focus")) {
-              ImGui::ClearActiveID();
-          }
-      }
-      ImGui::End();
-
-      // Генерация геометрии
-      ImGui::Render();
-
-      // Отрисовка сгенерированных треугольников ImGui на наш backbuffer
-      ImGui_ImplEquos_RenderDrawData(ImGui::GetDrawData());
 
       sysgui_mark_dirty(last_mx, last_my, 8, 8);
       sysgui_mark_dirty(cur_mx, cur_my, 8, 8);
 
-      // Отрисовка аппаратного курсора мыши
+      // Накладываем курсор
       draw_cursor_user(backbuffer, cur_mx, cur_my, screen_w, screen_h);
       
-      // Копирование dirty-тайлов во VRAM
+      // Копируем на экран
       copy_dirty_to_vram();
 
       last_mx = cur_mx; last_my = cur_my;
