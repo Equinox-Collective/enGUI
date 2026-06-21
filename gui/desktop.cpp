@@ -1,11 +1,13 @@
 #include "desktop.h"
 #include "../api_gui.h"
+#include "../imgui/imgui.h"
 
 extern "C" {
 #include <stdlib.h>
-#include <string.h>  // Для memset
+#include <string.h>
 #include <equos.h>
 #include <eid.h> 
+#include <stdio.h>
 }
 
 extern uint32_t *backbuffer;
@@ -13,12 +15,10 @@ extern uint32_t screen_w, screen_h;
 
 namespace GUI {
 
-    // struct Theme удален, так как он уже в desktop.h
-
     static const Theme g_Themes[] = {
-        { 0x1A1C29, 0x0E1017, "Sonoma Dark" },
-        { 0x1E102F, 0x0A0510, "Nebula Purple" },
-        { 0x0B1D20, 0x04090A, "Aqua Marin" }
+        { 0x1F2235, 0x121420, "Sonoma Pro Dark" },
+        { 0x180A2B, 0x07020E, "Aurora Borealis" },
+        { 0x071B20, 0x03080A, "Aqua Deep" }
     };
 
     static int g_CurrentThemeIdx = 0;
@@ -51,7 +51,7 @@ namespace GUI {
         }
         last_mx = mx; last_my = my;
 
-        if (g_IdleTime > 30.0f) g_ScreensaverActive = true;
+        if (g_IdleTime > 90.0f) g_ScreensaverActive = true; // Увеличили порог скринсейвера
 
         if (g_ScreensaverActive) {
             for (int i = 0; i < MAX_STARS; i++) {
@@ -63,6 +63,85 @@ namespace GUI {
                 }
             }
         }
+    }
+
+    // Рендеринг красивых виджетов на рабочий стол в стиле macOS Sonoma Dashboard
+    static void DrawDesktopWidgets() {
+        if (g_ScreensaverActive) return;
+
+        // Позиции виджетов в правой стороне экрана
+        int widget_w = 260;
+        int widget_h = 160;
+        int start_x = screen_w - widget_w - 40;
+        int start_y = 60;
+
+        // 1. ВИДЖЕТ ЧАСОВ (Стеклянная подложка + красивый дизайн)
+        draw_acrylic_blur(start_x, start_y, widget_w, widget_h, 0.5f, WIDGET_ROUNDING, 0x1E2235);
+        
+        ImGui::SetNextWindowPos(ImVec2((float)start_x, (float)start_y));
+        ImGui::SetNextWindowSize(ImVec2((float)widget_w, (float)widget_h));
+        ImGui::Begin("##WidgetClock", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs);
+        {
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            ImVec2 center(start_x + 70, start_y + widget_h / 2);
+            float radius = 50.0f;
+
+            // Циферблат часов
+            draw->AddCircleFilled(center, radius, 0x22121420, 64);
+            draw->AddCircle(center, radius, 0x558E8E93, 64, 1.5f);
+
+            // Фейковые стрелочки для красоты
+            draw->AddLine(center, ImVec2(center.x + 25, center.y - 15), 0xFFFFFFFF, 2.5f); // Часовая
+            draw->AddLine(center, ImVec2(center.x + 5, center.y + 35), 0xFF007AFF, 1.5f);  // Минутная
+            draw->AddCircleFilled(center, 4.0f, 0xFF007AFF);
+
+            // Текстовая дата рядом со стрелками
+            ImGui::SetCursorPos(ImVec2(140, 45));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 1.0f, 1.0f, 0.9f));
+            ImGui::Text("Monday");
+            ImGui::SetCursorPos(ImVec2(140, 65));
+            ImGui::TextColored(ImVec4(0.0f, 0.48f, 1.0f, 1.0f), "JUNE 21");
+            ImGui::SetCursorPos(ImVec2(140, 85));
+            ImGui::TextColored(ImVec4(1,1,1,0.5f), "EquinoxOS");
+            ImGui::PopStyleColor();
+        }
+        ImGui::End();
+
+        // 2. ВИДЖЕТ СТАТИСТИКИ РЕСУРСОВ
+        start_y += widget_h + 30;
+        draw_acrylic_blur(start_x, start_y, widget_w, widget_h, 0.5f, WIDGET_ROUNDING, 0x1E2235);
+
+        ImGui::SetNextWindowPos(ImVec2((float)start_x, (float)start_y));
+        ImGui::SetNextWindowSize(ImVec2((float)widget_w, (float)widget_h));
+        ImGui::Begin("##WidgetSysInfo", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs);
+        {
+            ImGui::SetCursorPos(ImVec2(20, 20));
+            ImGui::TextColored(ImVec4(0.0f, 0.7f, 1.0f, 1.0f), "SYSTEM HEALTH");
+            ImGui::Separator();
+            
+            uint64_t total = sys_get_total_mem() / (1024 * 1024);
+            uint64_t used = sys_get_used_mem() / (1024 * 1024);
+            float ratio = total > 0 ? (float)used / (float)total : 0.0f;
+
+            ImGui::SetCursorPos(ImVec2(20, 60));
+            ImGui::Text("RAM Occupied: %llu%%", (uint64_t)(ratio * 100));
+            
+            // Красивый сглаженный прогресс-бар памяти
+            ImDrawList* dlist = ImGui::GetWindowDrawList();
+            ImVec2 p_min(start_x + 20, start_y + 90);
+            ImVec2 p_max(start_x + widget_w - 20, start_y + 104);
+            dlist->AddRectFilled(p_min, p_max, 0xFF1C1D26, 6.0f);
+            
+            float width = (widget_w - 40) * ratio;
+            if (width > 0) {
+                ImVec2 p_act_max(start_x + 20 + width, start_y + 104);
+                dlist->AddRectFilled(p_min, p_act_max, 0xFF007AFF, 6.0f);
+            }
+
+            ImGui::SetCursorPos(ImVec2(20, 120));
+            ImGui::TextColored(ImVec4(1,1,1,0.4f), "Uptime: Active");
+        }
+        ImGui::End();
     }
 
     void RenderDesktop() {
@@ -84,8 +163,9 @@ namespace GUI {
             }
         } else {
             Theme t = g_Themes[g_CurrentThemeIdx];
-            // Используем t.c1 и t.c2 вместо top_color/bottom_color
+            // Плавный высококачественный градиент для обоев
             eid_draw_gradient_rect(backbuffer, screen_w, screen_h, 0, 0, screen_w, screen_h, t.c1, t.c2, true);
+            DrawDesktopWidgets();
         }
     }
 
