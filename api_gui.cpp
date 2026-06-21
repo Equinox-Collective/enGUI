@@ -9,6 +9,13 @@ extern "C" {
 
 #include "imgui/imgui.h"
 
+#ifndef ImMin
+#define ImMin(A, B) ((A) < (B) ? (A) : (B))
+#endif
+#ifndef ImMax
+#define ImMax(A, B) ((A) > (B) ? (A) : (B))
+#endif
+
 // Внешние линки из main.cpp
 extern uint32_t *draw_target;
 extern uint32_t screen_w, screen_h;
@@ -223,4 +230,20 @@ bool play_wav_file(const char *filename) {
     if (!addr) return false;
     _syscall(20, addr + 44, size - 44, 0, 0, 0); // Пропускаем заголовок WAV
     return true;
+}
+
+static bool boot_sound_loaded = false;
+
+void api_preload_boot_sound(void) {
+    // В будущем тут можно загружать res/sysgui/BOOTSOUND.wav в память
+    boot_sound_loaded = true; 
+}
+
+void api_try_boot_sound(void) {
+    static bool s_done = false;
+    if (s_done || !boot_sound_loaded) return;
+    
+    // Пытаемся воспроизвести звук приветствия
+    play_wav_file("res/sysgui/BOOTSOUND.wav");
+    s_done = true;
 }

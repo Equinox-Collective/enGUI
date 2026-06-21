@@ -1,8 +1,11 @@
 #ifndef GUI_TERMINAL_H
 #define GUI_TERMINAL_H
 
-#include "../api_gui.h"
+#include "../../api_gui.h"
 
+extern "C" {
+#include <stdlib.h> // Чтобы free() была видна в деструкторе
+}
 namespace GUI {
     class TerminalApp : public App {
     private:

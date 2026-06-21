@@ -19,8 +19,15 @@ namespace GUI {
         // Используем ImGui для элементов меню
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2((float)screen_w, 24));
-        ImGui::Begin("##TopPanel", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_ScrollbarNone);
-        {
+    
+        // ИСПРАВЛЕНО: ImGuiWindowFlags_NoScrollbar вместо ImGuiWindowFlags_ScrollbarNone
+        ImGuiWindowFlags flags = ImGuiWindowFlags_NoDecoration | 
+                                 ImGuiWindowFlags_NoBackground | 
+                                 ImGuiWindowFlags_NoMove | 
+                                 ImGuiWindowFlags_NoScrollbar;
+
+        ImGui::Begin("##TopPanel", nullptr, flags);
+            {
             ImDrawList* draw = ImGui::GetWindowDrawList();
 
             // Кнопка "EQ Menu"

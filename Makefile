@@ -16,7 +16,7 @@ CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-p
 LDFLAGS = -nostdlib -Ttext=0x1000000 -e _start
 
 IMGUI_SRCS = $(wildcard imgui/imgui*.cpp)
-GUI_SRCS = $(wildcard gui/*.cpp)
+GUI_SRCS = $(wildcard gui/*.cpp) $(wildcard gui/apps/*.cpp)
 SRCS = main.cpp api_gui.cpp $(IMGUI_SRCS) $(GUI_SRCS)
 
 OBJS = $(SRCS:.cpp=.o)
