@@ -163,11 +163,14 @@ static inline float cross_product(ImVec2 a, ImVec2 b, ImVec2 c) {
 void api_render_imgui_data(void* draw_data_ptr) {
     ImDrawData* draw_data = (ImDrawData*)draw_data_ptr;
     
-    // Получаем доступ к текстуре атласа шрифтов ImGui
+    // Получаем доступ к текстуре атласа шрифтов ImGui через легаси-совместимый метод
     ImGuiIO& io = ImGui::GetIO();
-    unsigned char* tex_pixels = io.Fonts->TexPixelsAlpha8;
-    int tex_w = io.Fonts->TexWidth;
-    int tex_h = io.Fonts->TexHeight;
+    unsigned char* tex_pixels = nullptr;
+    int tex_w = 0;
+    int tex_h = 0;
+    
+    // Этот метод сам достанет пиксели и размеры в версии 1.92+
+    io.Fonts->GetTexDataAsAlpha8(&tex_pixels, &tex_w, &tex_h);
 
     for (int n = 0; n < draw_data->CmdListsCount; n++) {
         const ImDrawList* cmd_list = draw_data->CmdLists[n];

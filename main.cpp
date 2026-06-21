@@ -85,11 +85,17 @@ int main(int argc, char **argv) {
         sys_exit(1);
     }
     
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr; // Выключаем imgui.ini, чтобы не дергать сырую VFS на запись
+     ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr; 
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
     io.DisplaySize = ImVec2((float)screen_w, (float)screen_h);
-    
+
+    // --- ЗАГРУЗКА ТВОЕГО ШРИФТА INTER.TTF ---
+    // Загружаем шрифт размером 16px и подключаем таблицу кириллицы
+    ImFont* font = io.Fonts->AddFontFromFileTTF("res/sysgui/inter.ttf", 16.0f, NULL, io.Fonts->GetGlyphRangesCyrillic());
+    if (!font) {
+        _syscall(1, (uint64_t)"WARNING: Could not load inter.ttf, using default font\n", 0, 0, 0, 0);
+    }
     // Настройка стиля Sonoma
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = WINDOW_ROUNDING_LARGE;
