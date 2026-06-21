@@ -1,54 +1,65 @@
 #include "panel.h"
-#include "desktop.h"
 #include "../api_gui.h"
 #include "../imgui/imgui.h"
+#include "desktop.h"
+
+extern "C" {
 #include <equos.h>
 #include <stdio.h>
+}
 
-extern uint32_t screen_w, screen_h;
-extern const char* g_ActiveWindowTitle;
+extern uint32_t screen_w;
 
 namespace GUI {
-    void RenderTopPanel(bool& start_menu_open) {
-        // Рисуем акриловую плашку статус-бара
-        draw_acrylic_blur(0, 0, screen_w, 24, 0.35f, 0, 0x1E222B);
 
-        // ImGui невидимое оверлейное окно для кнопок статус-бара
+    void RenderTopPanel() {
+        // 1. Акриловая полоска сверху (24px высота)
+        draw_acrylic_blur(0, 0, screen_w, 24, 0.4f, 0, 0x1A1C29);
+
+        // Используем ImGui для элементов меню
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2((float)screen_w, 24));
-        ImGui::Begin("##TopMenuBar", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove);
+        ImGui::Begin("##TopPanel", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_ScrollbarNone);
         {
-            ImGui::SetCursorPos(ImVec2(10, 3));
-            if (ImGui::Button("EQ", ImVec2(35, 18))) {
-                start_menu_open = !start_menu_open;
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+
+            // Кнопка "EQ Menu"
+            ImGui::SetCursorPos(ImVec2(10, 0));
+            if (ImGui::BeginMenu(" EQ ")) {
+                if (ImGui::MenuItem("About EquinoxOS...")) { /* Показать окно */ }
+                ImGui::Separator();
+                if (ImGui::MenuItem("System Settings...")) { /* Открыть настройки */ }
+                if (ImGui::MenuItem("Next Theme")) { NextTheme(); }
+                ImGui::Separator();
+                if (ImGui::MenuItem("Sleep", "Alt+S")) { /* Логика сна */ }
+                if (ImGui::MenuItem("Restart...")) { _syscall(10, 0, 0, 0, 0, 0); } // syscall exit
+                ImGui::EndMenu();
             }
 
-            ImGui::SameLine();
-            ImGui::SetCursorPosY(4);
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 0.9f), "%s", g_ActiveWindowTitle ? g_ActiveWindowTitle : "Desktop");
+            // Активное приложение (динамический текст)
+            ImGui::SameLine(60);
+            ImGui::TextColored(ImVec4(1,1,1,0.8f), "Finder");
 
-            // Отрисовка памяти
-            uint64_t used_ram = sys_get_used_mem();
-            uint64_t total_ram = sys_get_total_mem();
-            char ram_str[64];
-            sprintf(ram_str, "Memory: %llu/%llu MB", used_ram / (1024 * 1024), total_ram / (1024 * 1024));
+            // --- ПРАВАЯ ЧАСТЬ (Индикаторы) ---
             
-            float ram_text_width = ImGui::CalcTextSize(ram_str).x;
-            ImGui::SameLine((float)screen_w - ram_text_width - 100);
-            ImGui::SetCursorPosY(4);
-            ImGui::TextColored(ImVec4(0.6f, 0.8f, 0.5f, 1.0f), "%s", ram_str);
+            // Часы
+            uint64_t ms = _syscall(6, 0, 0, 0, 0, 0);
+            int secs = (ms / 1000) % 60;
+            int mins = (ms / 60000) % 60;
+            int hours = (ms / 3600000) % 24;
+            char time_str[16];
+            sprintf(time_str, "%02d:%02d:%02d", hours, mins, secs);
 
-            // Отрисовка часов CMOS
-            uint64_t ut = _syscall(6, 0, 0, 0, 0, 0) / 1000;
-            int hours = (ut / 3600) % 24;
-            int minutes = (ut / 60) % 60;
-            int seconds = ut % 60;
-            char clock_str[32];
-            sprintf(clock_str, "%02d:%02d:%02d", hours, minutes, seconds);
+            float time_width = ImGui::CalcTextSize(time_str).x;
+            ImGui::SameLine(screen_w - time_width - 15);
+            ImGui::Text("%s", time_str);
 
-            ImGui::SameLine((float)screen_w - 70);
-            ImGui::SetCursorPosY(4);
-            ImGui::TextColored(ImVec4(1.0f, 1.0f, 1.0f, 1.0f), "%s", clock_str);
+            // Индикатор батареи/питания (фейковый для красоты)
+            ImGui::SameLine(screen_w - time_width - 60);
+            draw->AddRectFilled(ImVec2(ImGui::GetCursorScreenPos().x, 6), 
+                               ImVec2(ImGui::GetCursorScreenPos().x + 20, 18), 0xFF48BB78, 2.0f);
+            draw->AddRectFilled(ImVec2(ImGui::GetCursorScreenPos().x + 20, 9), 
+                               ImVec2(ImGui::GetCursorScreenPos().x + 22, 15), 0xFF48BB78, 1.0f);
         }
         ImGui::End();
     }
