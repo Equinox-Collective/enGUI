@@ -10,7 +10,7 @@ namespace GUI {
         float timer;
 
     public:
-        MonitorApp();
+        MonitorApp(uint32_t id);
         virtual ~MonitorApp() {}
 
         void OnRender(float dt) override;
