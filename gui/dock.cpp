@@ -2,99 +2,118 @@
 #include "win_manager.h"
 #include "../api_gui.h"
 #include "../imgui/imgui.h"
-#include <equos.h>
 #include <math.h>
+
+extern "C" {
+#include <equos.h>
+#include <stdlib.h>
+#include <string.h>
+}
 
 extern uint32_t screen_w, screen_h;
 
 namespace GUI {
-    static const DockItem g_DockItems[] = {
-        { "Terminal", "Terminal Console",   0x21252B, ">_", nullptr },
-        { "Monitor",  "System Monitor",     0x4B5263, "M",  nullptr },
-        { "Paint",    "Vector Paint Brush", 0xFF8700, "P",  nullptr },
-        { "Explorer", "VFS File Explorer",  0xE5C07B, "E",  nullptr },
-        { "Notepad",  "Notepad Editor",     0x61AFEF, "N",  nullptr },
-        { "Doom",     "Doom (Ring 3)",      0xE06C75, "D",  "bin/doom.elf -iwad res/doom1.wad" }
-    };
-    static const int DOCK_ITEMS_COUNT = sizeof(g_DockItems) / sizeof(DockItem);
 
-    void InitDock() {}
+    struct DockApp {
+        const char* name;
+        const char* icon_text;
+        uint32_t color;
+        bool is_internal; // true - функция в коде, false - бинарник на диске
+    };
+
+    static DockApp g_DockApps[] = {
+        { "Finder",    "F", 0x4FACFE, true },
+        { "Terminal",  ">", 0x21252B, true },
+        { "Monitor",   "M", 0x48BB78, true },
+        { "Paint",     "P", 0xED8936, true },
+        { "Notepad",   "N", 0xA0AEC0, true },
+        { "Settings",  "S", 0x718096, true }
+    };
+    static const int DOCK_COUNT = sizeof(g_DockApps) / sizeof(DockApp);
+
+    // Параметры анимации
+    static float g_IconScales[DOCK_COUNT];
+
+    void InitDock() {
+        for (int i = 0; i < DOCK_COUNT; i++) g_IconScales[i] = 1.0f;
+    }
 
     void RenderDock(int mx, int my, bool mdown) {
-        static bool last_mdown = false;
+        // Константы дока
+        const int base_icon_size = 48;
+        const int pad = 12;
+        const int dock_h = base_icon_size + pad * 2;
         
-        int dock_h = 54;
-        int icon_size_base = 40;
-        int gap = 12;
+        // Динамический расчет ширины дока
+        float total_w = pad;
+        for(int i=0; i<DOCK_COUNT; i++) total_w += (base_icon_size * g_IconScales[i]) + pad;
+        
+        int dock_x = (screen_w - (int)total_w) / 2;
+        int dock_y = screen_h - dock_h - 15; // 15px отступ снизу
 
-        int dock_w = DOCK_ITEMS_COUNT * (icon_size_base + gap) + gap;
-        int dock_x = (screen_w - dock_w) / 2;
-        int dock_y = screen_h - dock_h - 12;
-
-        // Рисуем красивый размытый док с круглыми углами 14px
-        draw_acrylic_blur(dock_x, dock_y, dock_w, dock_h, 0.45f, 14, 0x1E222B);
-
+        // 1. Отрисовка Акриловой подложки
+        draw_acrylic_blur(dock_x, dock_y, (int)total_w, dock_h, 0.5f, 20, 0x1A1C29);
+        
+        // Добавляем тонкую рамку (бордер) для красоты
+        // (Реализуем через ImGui Overlay для простоты)
         ImGui::SetNextWindowPos(ImVec2((float)dock_x, (float)dock_y));
-        ImGui::SetNextWindowSize(ImVec2((float)dock_w, (float)dock_h));
-        ImGui::Begin("##DockOverlay", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoMove);
+        ImGui::SetNextWindowSize(ImVec2(total_w, (float)dock_h));
+        ImGui::Begin("##DockUI", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoInputs);
         {
-            ImDrawList* draw_list = ImGui::GetWindowDrawList();
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            float current_x = (float)dock_x + pad;
 
-            for (int i = 0; i < DOCK_ITEMS_COUNT; i++) {
-                const DockItem& item = g_DockItems[i];
-
-                int base_cx = dock_x + gap + i * (icon_size_base + gap) + icon_size_base / 2;
-                float dist_x = fabsf((float)mx - (float)base_cx);
-
-                float scale = 1.0f;
-                if (my >= dock_y - 15 && my <= (int)screen_h && dist_x < 80.0f) {
-                    scale = 1.0f + (1.0f - (dist_x / 80.0f)) * 0.35f; // Интерактивное увеличение иконок
-                }
-
-                int size = (int)((float)icon_size_base * scale);
-                int ix = base_cx - size / 2;
-                int iy = dock_y + (dock_h - size) / 2;
-
-                bool hover = (mx >= ix && mx < ix + size && my >= iy && my < iy + size);
-
-                // Отрисовка скругленного фона иконки дока
-                ImU32 col_bg = hover ? ImGui::GetColorU32(ImVec4(0.3f, 0.35f, 0.4f, 0.9f)) 
-                                     : ImGui::GetColorU32(ImVec4(0.13f, 0.15f, 0.17f, 0.80f));
+            for (int i = 0; i < DOCK_COUNT; i++) {
+                // 2. Расчет Magnification (увеличения)
+                float icon_center_x = current_x + (base_icon_size * g_IconScales[i]) / 2.0f;
+                float dist = fabsf((float)mx - icon_center_x);
                 
-                draw_list->AddRectFilled(ImVec2((float)ix, (float)iy), ImVec2((float)(ix + size), (float)(iy + size)), col_bg, 8.0f);
-
-                // Иконка-глиф
-                ImU32 col_glyph = item.color | 0xFF000000;
-                draw_list->AddRectFilled(ImVec2((float)(ix + 4), (float)(iy + 4)), ImVec2((float)(ix + size - 4), (float)(iy + size - 4)), col_glyph, 6.0f);
+                // Если мышь близко к доку по вертикали
+                float target_scale = 1.0f;
+                if (my > dock_y - 100) {
+                    float factor = 1.0f - (dist / 200.0f);
+                    if (factor < 0) factor = 0;
+                    target_scale = 1.0f + (factor * 0.6f); // Макс увеличение +60%
+                }
                 
-                if (item.text_glyph) {
-                    ImGui::SetWindowFontScale(scale);
-                    ImVec2 t_size = ImGui::CalcTextSize(item.text_glyph);
-                    draw_list->AddText(ImVec2((float)ix + ((float)size - t_size.x)/2.0f, (float)iy + ((float)size - t_size.y)/2.0f), 0xFFFFFFFF, item.text_glyph);
+                // Плавная интерполяция размера (Lerp)
+                g_IconScales[i] += (target_scale - g_IconScales[i]) * 0.2f;
+
+                float sz = base_icon_size * g_IconScales[i];
+                float yy = (float)dock_y + (dock_h - sz) / 2.0f;
+
+                // 3. Отрисовка Иконки
+                ImVec2 p1(current_x, yy);
+                ImVec2 p2(current_x + sz, yy + sz);
+                
+                // Фон иконки (Скругленный квадрат)
+                draw->AddRectFilled(p1, p2, g_DockApps[i].color | 0xFF000000, 12.0f);
+                
+                // Текст-глиф по центру
+                ImGui::SetWindowFontScale(g_IconScales[i] * 1.5f);
+                ImVec2 txt_sz = ImGui::CalcTextSize(g_DockApps[i].icon_text);
+                draw->AddText(ImVec2(current_x + (sz - txt_sz.x)/2, yy + (sz - txt_sz.y)/2), 0xFFFFFFFF, g_DockApps[i].icon_text);
+
+                // 4. Индикатор запущенного приложения (точка снизу)
+                if (IsAppActive(g_DockApps[i].name)) {
+                    draw->AddCircleFilled(ImVec2(icon_center_x, (float)dock_y + dock_h - 6), 2.5f, 0xFFFFFFFF);
                 }
 
-                // Индикатор того, что приложение запущено (маленькая белая точка под иконкой)
-                if (IsAppActive(item.win_title)) {
-                    draw_list->AddCircleFilled(ImVec2((float)base_cx, (float)(screen_h - 16)), 2.5f, 0xFFFFFFFF);
-                }
-
-                // Всплывающая подсказка над иконкой
-                if (hover) {
-                    ImGui::SetTooltip("%s", item.label);
-                    
-                    if (mdown && !last_mdown) {
-                        if (item.exec_cmd) {
-                            sys_exec(item.exec_cmd);
-                            OpenAppWindow(item.win_title);
-                        } else {
-                            OpenAppWindow(item.win_title);
-                        }
+                // 5. Обработка нажатия
+                if (mdown && mx >= current_x && mx <= current_x + sz && my >= yy && my <= yy + sz) {
+                    static uint32_t last_click_tick = 0;
+                    uint32_t now = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
+                    if (now - last_click_tick > 500) { // Anti-spam
+                        OpenAppWindow(g_DockApps[i].name);
+                        last_click_tick = now;
+                        // Звук клика (Sonoma style)
+                        play_wav_file("res/sounds/click.wav");
                     }
                 }
+
+                current_x += sz + pad;
             }
         }
         ImGui::End();
-        
-        last_mdown = mdown;
     }
 }
