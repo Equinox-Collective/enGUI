@@ -2,7 +2,8 @@
 #define GUI_PANEL_H
 
 namespace GUI {
-    void RenderTopPanel(bool& start_menu_open);
+    // Рендерит системную статусную строку сверху
+    void RenderTopPanel();
 }
 
 #endif
