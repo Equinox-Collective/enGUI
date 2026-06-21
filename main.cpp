@@ -13,13 +13,11 @@ extern "C" {
 
 #include "imgui/imgui.h"
 
-// --- ГЛОБАЛЬНЫЕ БУФЕРЫ ---
 uint32_t *vram = nullptr;
 uint32_t *backbuffer = nullptr;
-uint32_t *draw_target = nullptr; // Указывает на backbuffer для api_gui
+uint32_t *draw_target = nullptr;
 uint32_t screen_w = 0, screen_h = 0;
 
-// --- СИСТЕМА ОПТИМИЗАЦИИ (Dirty Grid) ---
 #define TILE_SIZE 32
 static uint8_t *dirty_grid = nullptr;
 static int grid_cols = 0, grid_rows = 0;
@@ -28,7 +26,7 @@ void sysgui_init_dirty_grid() {
     grid_cols = (screen_w + TILE_SIZE - 1) / TILE_SIZE;
     grid_rows = (screen_h + TILE_SIZE - 1) / TILE_SIZE;
     dirty_grid = (uint8_t *)malloc(grid_cols * grid_rows);
-    memset(dirty_grid, 1, grid_cols * grid_rows); // Сначала всё грязное
+    memset(dirty_grid, 1, grid_cols * grid_rows);
 }
 
 void sysgui_mark_dirty(int x, int y, int w, int h) {
@@ -42,7 +40,6 @@ void sysgui_mark_dirty(int x, int y, int w, int h) {
 }
 
 void copy_dirty_to_vram() {
-    // ВРЕМЕННО: Копируем весь кадр целиком каждый раз, чтобы убрать фриз экрана!
     memcpy(vram, backbuffer, screen_w * screen_h * 4);
 }
 
@@ -63,11 +60,9 @@ static inline void get_mouse_state(int* mx, int* my, bool* mdown) {
     *mdown = (r_btn & 1);
 }
 
-// --- ОСНОВНОЙ ВХОД ---
 int main(int argc, char **argv) {
-    // 1. Получаем инфо о видеорежиме (VESA LFB)
     uint64_t phys_fb = 0;
-    uint32_t w = 0, h = 0, pitch = 0; // w и h должны быть uint32_t!
+    uint32_t w = 0, h = 0, pitch = 0;
 
     _syscall(32, (uint64_t)&phys_fb, (uint64_t)&w, (uint64_t)&h, (uint64_t)&pitch, 0);
 
@@ -75,71 +70,77 @@ int main(int argc, char **argv) {
     screen_h = h;
 
     char msg[128];
-    sprintf(msg, "GUI: Screen resolution %ux%u. Requesting %u bytes...\n", screen_w, screen_h, screen_w * screen_h * 4);
+    sprintf(msg, "GUI: Sonoma Interface active %ux%u.\n", screen_w, screen_h);
     _syscall(1, (uint64_t)msg, 0, 0, 0, 0);
 
-    // 2. Инициализируем ImGui СНАЧАЛА (пока куча абсолютно чистая и не повреждена большими запросами)
     IMGUI_CHECKVERSION();
     if (!ImGui::CreateContext()) {
-        _syscall(1, (uint64_t)"FATAL: ImGui CreateContext failed!\n", 0, 0, 0, 0);
         sys_exit(1);
     }
     
-     ImGuiIO& io = ImGui::GetIO();
+    ImGuiIO& io = ImGui::GetIO();
     io.IniFilename = nullptr; 
     io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
     io.DisplaySize = ImVec2((float)screen_w, (float)screen_h);
 
-    // --- ЗАГРУЗКА ТВОЕГО ШРИФТА INTER.TTF ---
-    // Загружаем шрифт размером 16px и подключаем таблицу кириллицы
-    ImFont* font = io.Fonts->AddFontFromFileTTF("res/sysgui/inter.ttf", 16.0f, NULL, io.Fonts->GetGlyphRangesCyrillic());
+    // Увеличили размер шрифта до 18px для идеальной читаемости и четкости
+    ImFont* font = io.Fonts->AddFontFromFileTTF("res/sysgui/inter.ttf", 18.0f, NULL, io.Fonts->GetGlyphRangesCyrillic());
     if (!font) {
-        _syscall(1, (uint64_t)"WARNING: Could not load inter.ttf, using default font\n", 0, 0, 0, 0);
+        _syscall(1, (uint64_t)"WARNING: Could not load Inter.ttf, fallback\n", 0, 0, 0, 0);
     }
-    // Настройка стиля Sonoma
+
+    // --- НАСТРОЙКА СТИЛЯ MACOS SONOMA SYSTEM ---
     ImGuiStyle& style = ImGui::GetStyle();
     style.WindowRounding = WINDOW_ROUNDING_LARGE;
-    style.Colors[ImGuiCol_WindowBg] = ImVec4(0.1f, 0.1f, 0.12f, 0.0f); // Прозрачные для блюра
+    style.FrameRounding = 8.0f;
+    style.GrabRounding = 6.0f;
+    style.ScrollbarRounding = 10.0f;
+    style.ScrollbarSize = 8.0f; // Сделали скроллбар узким и аккуратным
+    style.WindowBorderSize = 0.0f;
+    style.FrameBorderSize = 0.0f;
 
-    // 3. Маппим VRAM и создаем бэкбуфер
+    // Цвета с отличным контрастом
+    style.Colors[ImGuiCol_WindowBg]             = ImVec4(0.08f, 0.09f, 0.15f, 0.0f); // Прозрачный под блюр
+    style.Colors[ImGuiCol_Text]                 = ImVec4(0.96f, 0.96f, 0.97f, 1.00f); // Ярко-белый/светло-серый
+    style.Colors[ImGuiCol_TextDisabled]         = ImVec4(0.55f, 0.55f, 0.57f, 1.00f);
+    style.Colors[ImGuiCol_Header]               = ImVec4(0.00f, 0.48f, 1.00f, 0.40f); // Акцентный синий
+    style.Colors[ImGuiCol_HeaderActive]         = ImVec4(0.00f, 0.48f, 1.00f, 0.80f);
+    style.Colors[ImGuiCol_HeaderHovered]        = ImVec4(0.00f, 0.48f, 1.00f, 0.60f);
+    style.Colors[ImGuiCol_Button]               = ImVec4(0.18f, 0.20f, 0.28f, 0.80f); // Контрастные кнопки
+    style.Colors[ImGuiCol_ButtonHovered]        = ImVec4(0.00f, 0.48f, 1.00f, 0.85f);
+    style.Colors[ImGuiCol_ButtonActive]         = ImVec4(0.00f, 0.38f, 0.85f, 1.00f);
+    style.Colors[ImGuiCol_FrameBg]              = ImVec4(0.12f, 0.14f, 0.22f, 0.80f);
+    style.Colors[ImGuiCol_FrameBgHovered]       = ImVec4(0.18f, 0.21f, 0.32f, 0.80f);
+    style.Colors[ImGuiCol_FrameBgActive]        = ImVec4(0.24f, 0.27f, 0.40f, 0.80f);
+    style.Colors[ImGuiCol_ScrollbarBg]          = ImVec4(0.05f, 0.05f, 0.10f, 0.20f);
+    style.Colors[ImGuiCol_ScrollbarGrab]        = ImVec4(0.35f, 0.35f, 0.45f, 0.50f);
+    style.Colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.45f, 0.45f, 0.55f, 0.70f);
+    style.Colors[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.00f, 0.48f, 1.00f, 0.80f);
+
     vram = (uint32_t *)_syscall(30, phys_fb, screen_w * screen_h * 4, 0, 0, 0);
     if (!vram) {
-        _syscall(1, (uint64_t)"FATAL: Could not map VRAM!\n", 0, 0, 0, 0);
         sys_exit(1);
     }
     backbuffer = (uint32_t *)malloc(screen_w * screen_h * 4);
     if (!backbuffer) {
-        _syscall(1, (uint64_t)"FATAL: Out of memory for backbuffer\n", 0, 0, 0, 0);
         sys_exit(1);
     }
     draw_target = backbuffer;
     sysgui_init_dirty_grid();
 
-    // 4. Отладочный вывод адресов для проверки наложения секции BSS и кучи
-    char dbg_mem[512];
-    sprintf(dbg_mem, "DEBUG: GImGui ptr: %p, Fonts ptr: %p, backbuffer ptr: %p\n", 
-            (void*)ImGui::GetCurrentContext(), (void*)io.Fonts, (void*)backbuffer);
-    _syscall(1, (uint64_t)dbg_mem, 0, 0, 0, 0);
-
-    // 5. Инициализируем модули GUI
     GUI::InitDesktop();
     GUI::InitDock();
     GUI::InitWindowManager();
     
-    // api_preload_boot_sound();
-    // api_try_boot_sound();
-
     uint32_t last_time = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
     int mx = 0, my = 0;
     bool mdown = false;
 
-    // ГЛАВНЫЙ ЦИКЛ
     while (true) {
         uint32_t now = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
         float dt = (now - last_time) / 1000.0f;
         last_time = now;
 
-        // Ввод: Мышь
         get_mouse_state(&mx, &my, &mdown);
 
         io.MousePos = ImVec2((float)mx, (float)my);
@@ -147,13 +148,6 @@ int main(int argc, char **argv) {
         io.DeltaTime = (dt > 0) ? dt : 0.001f;
 
         GUI::RenderDesktop();
-
-        // --- ДОБАВЬ ЭТОТ ДЕБАГ ---
-        // char dbg_loop[256];
-        // sprintf(dbg_loop, "LOOP: GImGui: %p, Fonts: %p\n", 
-        //         (void*)ImGui::GetCurrentContext(), (void*)io.Fonts);
-        // _syscall(1, (uint64_t)dbg_loop, 0, 0, 0, 0);
-        // -------------------------
 
         ImGui::NewFrame();
         
@@ -164,23 +158,29 @@ int main(int argc, char **argv) {
 
         ImGui::Render();
 
-        // Шаг 3: Программный растеризатор ImGui поверх всего
         api_render_imgui_data(ImGui::GetDrawData());
 
-        // Шаг 4: Курсор (простой софтварный треугольник)
-        for(int i=0; i<10; i++) {
-            for(int j=0; j<i; j++) {
-                int px = mx + j, py = my + i;
-                if(px < screen_w && py < screen_h) backbuffer[py * screen_w + px] = 0xFFFFFF;
+        // Отрисовка сглаженного курсора macOS-style (вместо пиксельного треугольника)
+        for(int i = 0; i < 16; i++) {
+            for(int j = 0; j < i; j++) {
+                // Плавный угол стрелки
+                if (j < i - 1) {
+                    int px = mx + j, py = my + i;
+                    if(px < (int)screen_w && py < (int)screen_h) {
+                        backbuffer[py * screen_w + px] = 0xFFFFFF; // Белое тело
+                    }
+                } else {
+                    // Контур курсора
+                    int px = mx + j, py = my + i;
+                    if(px < (int)screen_w && py < (int)screen_h) {
+                        backbuffer[py * screen_w + px] = 0x000000; // Черная кайма
+                    }
+                }
             }
         }
 
-        // Шаг 5: Копирование измененных тайлов на экран
         copy_dirty_to_vram();
-        
         api_tick_audio();
-        
-        // Ограничение FPS (~60)
         _syscall(13, 16, 0, 0, 0, 0); 
     }
 
