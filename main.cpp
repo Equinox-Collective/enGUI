@@ -8,6 +8,7 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <equos.h>
+#include <stdio.h>
 }
 
 #include "imgui/imgui.h"
@@ -41,39 +42,52 @@ void sysgui_mark_dirty(int x, int y, int w, int h) {
 }
 
 void copy_dirty_to_vram() {
-    for (int r = 0; r < grid_rows; r++) {
-        for (int c = 0; c < grid_cols; c++) {
-            if (dirty_grid[r * grid_cols + c]) {
-                int x = c * TILE_SIZE;
-                int y = r * TILE_SIZE;
-                for (int i = 0; i < TILE_SIZE && (y + i) < screen_h; i++) {
-                    int offset = (y + i) * screen_w + x;
-                    int line_w = (x + TILE_SIZE > screen_w) ? (screen_w - x) : TILE_SIZE;
-                    memcpy(&vram[offset], &backbuffer[offset], line_w * 4);
-                }
-                dirty_grid[r * grid_cols + c] = 0; // Очищаем флаг
-            }
-        }
-    }
+    // ВРЕМЕННО: Копируем весь кадр целиком каждый раз, чтобы убрать фриз экрана!
+    memcpy(vram, backbuffer, screen_w * screen_h * 4);
+}
+
+static inline void get_mouse_state(int* mx, int* my, bool* mdown) {
+    uint64_t r_mx = 0, r_my = 0, r_btn = 0;
+    __asm__ volatile(
+        "mov $7, %%rax\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        "mov %%rbx, %1\n\t"
+        "mov %%rcx, %2\n\t"
+        : "=r"(r_mx), "=r"(r_my), "=r"(r_btn)
+        :
+        : "rax", "rbx", "rcx", "memory"
+    );
+    *mx = (int)r_mx;
+    *my = (int)r_my;
+    *mdown = (r_btn & 1);
 }
 
 // --- ОСНОВНОЙ ВХОД ---
 int main(int argc, char **argv) {
     // 1. Получаем инфо о видеорежиме (VESA LFB)
-    uint64_t phys_fb, w, h, pitch;
+    uint64_t phys_fb = 0;
+    uint32_t w = 0, h = 0, pitch = 0; // w и h должны быть uint32_t!
+
     _syscall(32, (uint64_t)&phys_fb, (uint64_t)&w, (uint64_t)&h, (uint64_t)&pitch, 0);
-    screen_w = (uint32_t)w; screen_h = (uint32_t)h;
 
-    // 2. Маппим VRAM и создаем бэкбуфер
-    vram = (uint32_t *)_syscall(30, phys_fb, screen_w * screen_h * 4, 0, 0, 0);
-    backbuffer = (uint32_t *)malloc(screen_w * screen_h * 4);
-    draw_target = backbuffer;
-    sysgui_init_dirty_grid();
+    screen_w = w; 
+    screen_h = h;
 
-    // 3. Инициализируем ImGui
+    char msg[128];
+    sprintf(msg, "GUI: Screen resolution %ux%u. Requesting %u bytes...\n", screen_w, screen_h, screen_w * screen_h * 4);
+    _syscall(1, (uint64_t)msg, 0, 0, 0, 0);
+
+    // 2. Инициализируем ImGui СНАЧАЛА (пока куча абсолютно чистая и не повреждена большими запросами)
     IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
+    if (!ImGui::CreateContext()) {
+        _syscall(1, (uint64_t)"FATAL: ImGui CreateContext failed!\n", 0, 0, 0, 0);
+        sys_exit(1);
+    }
+    
     ImGuiIO& io = ImGui::GetIO();
+    io.IniFilename = nullptr; // Выключаем imgui.ini, чтобы не дергать сырую VFS на запись
+    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
     io.DisplaySize = ImVec2((float)screen_w, (float)screen_h);
     
     // Настройка стиля Sonoma
@@ -81,13 +95,33 @@ int main(int argc, char **argv) {
     style.WindowRounding = WINDOW_ROUNDING_LARGE;
     style.Colors[ImGuiCol_WindowBg] = ImVec4(0.1f, 0.1f, 0.12f, 0.0f); // Прозрачные для блюра
 
-    // 4. Инициализируем модули GUI
+    // 3. Маппим VRAM и создаем бэкбуфер
+    vram = (uint32_t *)_syscall(30, phys_fb, screen_w * screen_h * 4, 0, 0, 0);
+    if (!vram) {
+        _syscall(1, (uint64_t)"FATAL: Could not map VRAM!\n", 0, 0, 0, 0);
+        sys_exit(1);
+    }
+    backbuffer = (uint32_t *)malloc(screen_w * screen_h * 4);
+    if (!backbuffer) {
+        _syscall(1, (uint64_t)"FATAL: Out of memory for backbuffer\n", 0, 0, 0, 0);
+        sys_exit(1);
+    }
+    draw_target = backbuffer;
+    sysgui_init_dirty_grid();
+
+    // 4. Отладочный вывод адресов для проверки наложения секции BSS и кучи
+    char dbg_mem[512];
+    sprintf(dbg_mem, "DEBUG: GImGui ptr: %p, Fonts ptr: %p, backbuffer ptr: %p\n", 
+            (void*)ImGui::GetCurrentContext(), (void*)io.Fonts, (void*)backbuffer);
+    _syscall(1, (uint64_t)dbg_mem, 0, 0, 0, 0);
+
+    // 5. Инициализируем модули GUI
     GUI::InitDesktop();
     GUI::InitDock();
     GUI::InitWindowManager();
     
-    api_preload_boot_sound();
-    api_try_boot_sound();
+    // api_preload_boot_sound();
+    // api_try_boot_sound();
 
     uint32_t last_time = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
     int mx = 0, my = 0;
@@ -100,19 +134,21 @@ int main(int argc, char **argv) {
         last_time = now;
 
         // Ввод: Мышь
-        uint64_t r_mx, r_my, r_btn;
-        _syscall(7, (uint64_t)&r_mx, (uint64_t)&r_my, (uint64_t)&r_btn, 0, 0);
-        mx = (int)r_mx; my = (int)r_my; mdown = (r_btn & 1);
+        get_mouse_state(&mx, &my, &mdown);
 
         io.MousePos = ImVec2((float)mx, (float)my);
         io.MouseDown[0] = mdown;
         io.DeltaTime = (dt > 0) ? dt : 0.001f;
 
-        // РЕНДЕРИНГ
-        // Шаг 1: Рабочий стол (обои)
         GUI::RenderDesktop();
 
-        // Шаг 2: ImGui кадр
+        // --- ДОБАВЬ ЭТОТ ДЕБАГ ---
+        // char dbg_loop[256];
+        // sprintf(dbg_loop, "LOOP: GImGui: %p, Fonts: %p\n", 
+        //         (void*)ImGui::GetCurrentContext(), (void*)io.Fonts);
+        // _syscall(1, (uint64_t)dbg_loop, 0, 0, 0, 0);
+        // -------------------------
+
         ImGui::NewFrame();
         
         GUI::UpdateDesktop(dt, mx, my, mdown, 0);

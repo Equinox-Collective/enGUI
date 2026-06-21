@@ -107,7 +107,7 @@ namespace GUI {
                         OpenAppWindow(g_DockApps[i].name);
                         last_click_tick = now;
                         // Звук клика (Sonoma style)
-                        play_wav_file("res/sounds/click.wav");
+                        play_wav_file("res/sysgui/click.wav");
                     }
                 }
 

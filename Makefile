@@ -13,7 +13,7 @@ CXXFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno
 CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
          -fno-omit-frame-pointer -I$(SDK_DIR)/include -I./imgui -O2 -MMD -MP
 
-LDFLAGS = -nostdlib -Ttext=0x1000000 -e _start 
+LDFLAGS = -nostdlib -T app.ld
 
 IMGUI_SRCS = $(wildcard imgui/imgui*.cpp)
 GUI_SRCS = $(wildcard gui/*.cpp) $(wildcard gui/apps/*.cpp)

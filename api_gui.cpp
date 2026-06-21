@@ -27,12 +27,22 @@ static int scratch_w = 0, scratch_h = 0;
 
 static void ensure_blur_buffers(int w, int h) {
     if (w <= scratch_w && h <= scratch_h && blur_scratch_1) return;
-    if (blur_scratch_1) free(blur_scratch_1);
-    if (blur_scratch_2) free(blur_scratch_2);
+    if (blur_scratch_1) { free(blur_scratch_1); blur_scratch_1 = nullptr; }
+    if (blur_scratch_2) { free(blur_scratch_2); blur_scratch_2 = nullptr; }
+    
     blur_scratch_1 = (uint32_t *)malloc(w * h * sizeof(uint32_t));
     blur_scratch_2 = (uint32_t *)malloc(w * h * sizeof(uint32_t));
+    
+    if (!blur_scratch_1 || !blur_scratch_2) {
+        // Ошибка: не удалось выделить память под блюр
+        if (blur_scratch_1) { free(blur_scratch_1); blur_scratch_1 = nullptr; }
+        if (blur_scratch_2) { free(blur_scratch_2); blur_scratch_2 = nullptr; }
+        scratch_w = 0; scratch_h = 0;
+        return;
+    }
     scratch_w = w; scratch_h = h;
 }
+
 
 // --- ACRYLIC ENGINE: СКОРОСТНОЙ ПРОГРАММНЫЙ БЛЮР ---
 
@@ -58,13 +68,15 @@ static inline bool is_pixel_masked(int tx, int ty, int w, int h, int r) {
 }
 
 void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, uint32_t tint_rgb) {
-    if (w <= 0 || h <= 0) return;
-    
     // 1. Downsampling (x4 ускорение)
+    if (!draw_target) return;
     int dsW = w / 4;
     int dsH = h / 4;
     if (dsW < 1) dsW = 1; if (dsH < 1) dsH = 1;
-    ensure_blur_buffers(dsW, dsH);
+    if (w <= 0 || h <= 0) return;
+    
+    ensure_blur_buffers(w / 4, h / 4);
+    if (!blur_scratch_1) return; 
 
     for (int dy = 0; dy < dsH; dy++) {
         for (int dx = 0; dx < dsW; dx++) {
@@ -150,6 +162,13 @@ static inline float cross_product(ImVec2 a, ImVec2 b, ImVec2 c) {
 
 void api_render_imgui_data(void* draw_data_ptr) {
     ImDrawData* draw_data = (ImDrawData*)draw_data_ptr;
+    
+    // Получаем доступ к текстуре атласа шрифтов ImGui
+    ImGuiIO& io = ImGui::GetIO();
+    unsigned char* tex_pixels = io.Fonts->TexPixelsAlpha8;
+    int tex_w = io.Fonts->TexWidth;
+    int tex_h = io.Fonts->TexHeight;
+
     for (int n = 0; n < draw_data->CmdListsCount; n++) {
         const ImDrawList* cmd_list = draw_data->CmdLists[n];
         const ImDrawVert* vtx_buffer = cmd_list->VtxBuffer.Data;
@@ -191,9 +210,24 @@ void api_render_imgui_data(void* draw_data_ptr) {
                         float w3 = 1.0f - w1 - w2;
 
                         if (w1 >= 0 && w2 >= 0 && w3 >= 0) {
-                            // Интерполяция цвета (RGBA)
-                            ImU32 col = v1.col; // Для простоты берем цвет первой вершины (или можно интерполировать)
-                            int a = (col >> 24) & 0xFF;
+                            // 1. Интерполируем текстурные координаты UV для текущего пикселя
+                            float tu = w1 * v1.uv.x + w2 * v2.uv.x + w3 * v3.uv.x;
+                            float tv = w1 * v1.uv.y + w2 * v2.uv.y + w3 * v3.uv.y;
+
+                            // Превращаем нормализованные UV в пиксели текстуры атласа
+                            int tx = (int)(tu * (float)tex_w);
+                            int ty = (int)(tv * (float)tex_h);
+                            if (tx < 0) tx = 0; if (tx >= tex_w) tx = tex_w - 1;
+                            if (ty < 0) ty = 0; if (ty >= tex_h) ty = tex_h - 1;
+
+                            // Читаем альфу из атласа шрифтов (если текстура не готова, считаем за 255)
+                            uint8_t tex_alpha = tex_pixels ? tex_pixels[ty * tex_w + tx] : 255;
+
+                            ImU32 col = v1.col;
+                            int vertex_alpha = (col >> 24) & 0xFF;
+                            
+                            // 2. Итоговая альфа = альфа вершины * альфа текстуры шрифта
+                            int a = (vertex_alpha * tex_alpha) / 255;
                             if (a == 0) continue;
 
                             int r = (col & 0xFF), g = (col >> 8) & 0xFF, b = (col >> 16) & 0xFF;
