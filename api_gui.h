@@ -4,12 +4,17 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Константы оформления (Sonoma Design Language)
-#define COLOR_ACCENT          0x61AFEF
-#define COLOR_GLASS_TINT      0x1A1C29
-#define COLOR_BORDER_LIGHT    0x4A505C
-#define WINDOW_ROUNDING_LARGE 12
-#define DOCK_ROUNDING         16
+// --- SONOMA DESIGN SYSTEM CONSTANTS ---
+#define COLOR_ACCENT          0x007AFF  // Классический macOS Accent Blue
+#define COLOR_GLASS_TINT      0x0A0C16  // Глубокий темный стеклянный тон
+#define COLOR_BORDER_LIGHT    0x3A3F4D  // Светлая обводка для создания объема
+#define COLOR_BORDER_DARK     0x1A1C25  // Темная контрастная граница
+#define COLOR_TEXT_PRIMARY    0xF5F5F7  // Яркий контрастный текст (San Francisco style)
+#define COLOR_TEXT_MUTED      0x8E8E93  // Приглушенный текст для второстепенных данных
+
+#define WINDOW_ROUNDING_LARGE 16
+#define DOCK_ROUNDING         20
+#define WIDGET_ROUNDING       18
 
 #ifdef __cplusplus
 extern "C" {
@@ -18,47 +23,32 @@ extern "C" {
 /**
  * --- СИСТЕМНЫЙ АУДИО-СТЕК ---
  */
-
-// Фоновая загрузка системных звуков (Boot, Click, Error)
 void api_preload_boot_sound(void);
-// Проигрывание приветствия (вызывается один раз при старте GUI)
 void api_try_boot_sound(void);
-// Тик аудио-драйвера (вызывать в главном цикле)
 void api_tick_audio(void);
-// Проиграть любой WAV файл
 bool play_wav_file(const char *filename);
 
-
 /**
- * --- ГРАФИЧЕСКИЙ ДВИЖЕК (ACRYLIC ENGINE) ---
+ * --- ГРАФИЧЕСКИЙ ДВИЖЕК (ACRYLIC GLASS ENGINE) ---
  */
-
-// Основная функция отрисовки "Акрилового стекла"
-// amount_f: интенсивность размытия (0.0 - 1.0)
-// radius: скругление углов
-// tint_rgb: цвет подложки
+// Отрисовка размытия с адаптивной субдискретизацией и наложением шума (гранулярности)
 void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, uint32_t tint_rgb);
-
-// Рисует мягкую тень под объектом (программная аппроксимация)
+// Программный расчет мягкой тени (гауссово приближение)
 void draw_soft_shadow(int x, int y, int w, int h, int strength);
-
-// Вспомогательная функция для маркировки грязных регионов (оптимизация VRAM)
+// Пометка грязных областей экрана (оптимизация обновления VRAM)
 void sysgui_mark_dirty(int x, int y, int w, int h);
 
-
 /**
- * --- ИНТЕРФЕЙС РАСТЕРИЗАТОРА IMGUI ---
+ * --- ИНТЕРФЕЙС СГЛАЖЕННОГО РАСТЕРИЗАТОРА IMGUI ---
  */
-
 struct SoftwareTexture {
     uint32_t* pixels;
     int width;
     int height;
 };
 
-// Инициализация текстур шрифтов для ImGui
 void api_init_imgui_rasterizer(void);
-// Рендеринг накопленных данных ImGui в backbuffer
+// Рендеринг данных ImGui с использованием билинейной фильтрации шрифтов для борьбы с алиасингом
 void api_render_imgui_data(void* draw_data);
 
 #ifdef __cplusplus
@@ -66,18 +56,18 @@ void api_render_imgui_data(void* draw_data);
 #endif
 
 /**
- * --- КЛАССЫ ПРИЛОЖЕНИЙ (C++ Interface) ---
+ * --- КЛАССЫ ПРИЛОЖЕНИЙ (C++ Object Model) ---
  */
 #ifdef __cplusplus
 namespace GUI {
-    // Базовый класс для всех оконных приложений
     class App {
     public:
         const char* title;
+        uint32_t instance_id; // Уникальный ID запущенной копии
         bool is_open;
         bool is_focused;
 
-        App(const char* t) : title(t), is_open(false), is_focused(false) {}
+        App(const char* t, uint32_t id) : title(t), instance_id(id), is_open(false), is_focused(false) {}
         virtual ~App() {}
 
         virtual void OnRender(float dt) = 0;
