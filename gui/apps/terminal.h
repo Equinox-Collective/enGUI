@@ -4,8 +4,9 @@
 #include "../../api_gui.h"
 
 extern "C" {
-#include <stdlib.h> // Чтобы free() была видна в деструкторе
+#include <stdlib.h> 
 }
+
 namespace GUI {
     class TerminalApp : public App {
     private:
@@ -19,7 +20,7 @@ namespace GUI {
         void ExecuteCommand(const char* cmd);
 
     public:
-        TerminalApp();
+        TerminalApp(uint32_t id);
         virtual ~TerminalApp() {
             for (int i = 0; i < log_size; i++) if (log_lines[i]) free(log_lines[i]);
         }
