@@ -16,6 +16,13 @@ extern "C" {
 #define ImMax(A, B) ((A) > (B) ? (A) : (B))
 #endif
 
+// Вспомогательная функция ограничения значений, независимая от пространств имен ImGui
+static inline int clamp_int(int val, int min_val, int max_val) {
+    if (val < min_val) return min_val;
+    if (val > max_val) return max_val;
+    return val;
+}
+
 extern uint32_t *draw_target;
 extern uint32_t screen_w, screen_h;
 
@@ -154,9 +161,9 @@ void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, u
 
             // Наложение мягкого пленочного шума (дизеринг цвета) для реалистичности стекла
             int noise = (rand() % 4) - 2;
-            fr = ImClamp(fr + noise, 0, 255);
-            fg = ImClamp(fg + noise, 0, 255);
-            fb = ImClamp(fb + noise, 0, 255);
+            fr = clamp_int(fr + noise, 0, 255);
+            fg = clamp_int(fg + noise, 0, 255);
+            fb = clamp_int(fb + noise, 0, 255);
             
             row[dx] = (fr << 16) | (fg << 8) | fb;
         }

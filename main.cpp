@@ -84,7 +84,7 @@ int main(int argc, char **argv) {
     io.DisplaySize = ImVec2((float)screen_w, (float)screen_h);
 
     // Увеличили размер шрифта до 18px для идеальной читаемости и четкости
-    ImFont* font = io.Fonts->AddFontFromFileTTF("res/sysgui/inter.ttf", 18.0f, NULL, io.Fonts->GetGlyphRangesCyrillic());
+    ImFont* font = io.Fonts->AddFontFromFileTTF("res/sysgui/Inter.ttf", 18.0f, NULL, io.Fonts->GetGlyphRangesCyrillic());
     if (!font) {
         _syscall(1, (uint64_t)"WARNING: Could not load Inter.ttf, fallback\n", 0, 0, 0, 0);
     }
@@ -141,36 +141,41 @@ int main(int argc, char **argv) {
         float dt = (now - last_time) / 1000.0f;
         last_time = now;
 
+        // Ввод: Мышь
         get_mouse_state(&mx, &my, &mdown);
 
         io.MousePos = ImVec2((float)mx, (float)my);
         io.MouseDown[0] = mdown;
         io.DeltaTime = (dt > 0) ? dt : 0.001f;
 
-        GUI::RenderDesktop();
-
+        // 1. Инициализируем новый кадр Dear ImGui в самом начале цикла.
+        // Это критически важно, так как фоновые виджеты рабочего стола используют контекст ImGui.
         ImGui::NewFrame();
+
+        // 2. Отрисовка подложки рабочего стола и виджетов (теперь вызовы ImGui безопасны)
+        GUI::RenderDesktop();
         
+        // 3. Обновление состояния и рендеринг системных элементов интерфейса
         GUI::UpdateDesktop(dt, mx, my, mdown, 0);
         GUI::RenderTopPanel();
         GUI::RenderDock(mx, my, mdown);
         GUI::RenderWindows(dt);
 
+        // 4. Финализация кадра ImGui
         ImGui::Render();
 
+        // 5. Программный растеризатор ImGui поверх всего кадра
         api_render_imgui_data(ImGui::GetDrawData());
 
-        // Отрисовка сглаженного курсора macOS-style (вместо пиксельного треугольника)
+        // 6. Отрисовка софтварного сглаженного курсора
         for(int i = 0; i < 16; i++) {
             for(int j = 0; j < i; j++) {
-                // Плавный угол стрелки
                 if (j < i - 1) {
                     int px = mx + j, py = my + i;
                     if(px < (int)screen_w && py < (int)screen_h) {
                         backbuffer[py * screen_w + px] = 0xFFFFFF; // Белое тело
                     }
                 } else {
-                    // Контур курсора
                     int px = mx + j, py = my + i;
                     if(px < (int)screen_w && py < (int)screen_h) {
                         backbuffer[py * screen_w + px] = 0x000000; // Черная кайма
@@ -179,8 +184,12 @@ int main(int argc, char **argv) {
             }
         }
 
+        // 7. Копирование измененных тайлов на экран
         copy_dirty_to_vram();
+        
         api_tick_audio();
+        
+        // Ограничение FPS (~60)
         _syscall(13, 16, 0, 0, 0, 0); 
     }
 
