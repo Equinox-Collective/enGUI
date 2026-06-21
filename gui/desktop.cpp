@@ -4,61 +4,73 @@
 extern "C" {
 #include <stdlib.h>
 #include <equos.h>
-#include <eid.h>
+#include <eid.h> // Используем системные примитивы рисования
 }
+
 extern uint32_t *backbuffer;
 extern uint32_t screen_w, screen_h;
 
 namespace GUI {
-    static const Theme g_Themes[] = {
-        { 0x1A1C29, 0x0E1017, "Sonoma Dark" },
-        { 0x1E102F, 0x0A0510, "Nebula Purple" },
-        { 0x0B1D20, 0x04090A, "Aqua Marin" }
-    };
-    static int g_CurrentThemeIdx = 0;
 
-    // Скринсейвер "Starfield"
-    struct Star {
-        float x, y, z;
+    // Структура темы оформления
+    struct Theme {
+        uint32_t top_color;
+        uint32_t bottom_color;
+        const char* name;
     };
-    static const int MAX_STARS = 60;
-    static Star g_Stars[MAX_STARS];
-    static float g_LastInputTime = 0.0f;
+
+    static const Theme g_Themes[] = {
+        { 0x5C4B9B, 0x1A1C29, "Sonoma Night" }, // Глубокий фиолетовый
+        { 0xFF8C42, 0x6B2D5C, "Solar Flare" },  // Оранжево-розовый
+        { 0x4FACFE, 0x00F2FE, "Aqua Flow" }     // Лазурный
+    };
+
+    static int g_CurrentThemeIdx = 0;
+    static float g_IdleTime = 0.0f;
     static bool g_ScreensaverActive = false;
 
+    // Параметры звезд для скринсейвера
+    struct Star {
+        float x, y, z;
+        float prev_z;
+    };
+    static const int MAX_STARS = 150;
+    static Star g_Stars[MAX_STARS];
+
     void InitDesktop() {
-        g_LastInputTime = (float)_syscall(6, 0, 0, 0, 0, 0) / 1000.0f;
+        // Инициализация звезд в 3D пространстве
         for (int i = 0; i < MAX_STARS; i++) {
-            g_Stars[i].x = (float)(rand() % 600 - 300);
-            g_Stars[i].y = (float)(rand() % 600 - 300);
-            g_Stars[i].z = (float)(rand() % 400 + 1);
+            g_Stars[i].x = (float)(rand() % 1000 - 500);
+            g_Stars[i].y = (float)(rand() % 1000 - 500);
+            g_Stars[i].z = (float)(rand() % 1000);
+            g_Stars[i].prev_z = g_Stars[i].z;
         }
     }
 
     void UpdateDesktop(float dt, int mx, int my, bool mdown, uint16_t key) {
         static int last_mx = -1, last_my = -1;
-        static bool last_mdown = false;
         
-        float now = (float)_syscall(6, 0, 0, 0, 0, 0) / 1000.0f;
-        
-        if (mx != last_mx || my != last_my || mdown != last_mdown || key != 0) {
-            g_LastInputTime = now;
+        // Проверка активности пользователя
+        if (mx != last_mx || my != last_my || mdown || key != 0) {
+            g_IdleTime = 0.0f;
             g_ScreensaverActive = false;
+        } else {
+            g_IdleTime += dt;
         }
-        
-        last_mx = mx; last_my = my; last_mdown = mdown;
+        last_mx = mx; last_my = my;
 
-        if (now - g_LastInputTime > 15.0f) {
+        // Активация скринсейвера через 30 секунд бездействия
+        if (g_IdleTime > 30.0f) {
             g_ScreensaverActive = true;
         }
 
         if (g_ScreensaverActive) {
             for (int i = 0; i < MAX_STARS; i++) {
-                g_Stars[i].z -= 150.0f * dt;
-                if (g_Stars[i].z <= 0) {
-                    g_Stars[i].x = (float)(rand() % 600 - 300);
-                    g_Stars[i].y = (float)(rand() % 600 - 300);
-                    g_Stars[i].z = 400.0f;
+                g_Stars[i].prev_z = g_Stars[i].z;
+                g_Stars[i].z -= 400.0f * dt; // Скорость полета
+                if (g_Stars[i].z <= 1) {
+                    g_Stars[i].z = 1000.0f;
+                    g_Stars[i].prev_z = g_Stars[i].z;
                 }
             }
         }
@@ -66,30 +78,42 @@ namespace GUI {
 
     void RenderDesktop() {
         if (g_ScreensaverActive) {
-            // Рисуем космос
-            eid_draw_rect(backbuffer, screen_w, screen_h, 0, 0, screen_w, screen_h, 0x000000);
-            float sw_f = (float)screen_w;
-            float sh_f = (float)screen_h;
+            // Очистка черным для космоса
+            memset(backbuffer, 0, screen_w * screen_h * 4);
+            
+            float cx = (float)screen_w / 2.0f;
+            float cy = (float)screen_h / 2.0f;
+
             for (int i = 0; i < MAX_STARS; i++) {
-                float k = 120.0f / g_Stars[i].z;
-                int sx = (int)(sw_f / 2.0f + g_Stars[i].x * k);
-                int sy = (int)(sh_f / 2.0f + g_Stars[i].y * k);
-                if (sx >= 0 && sx < (int)screen_w && sy >= 0 && sy < (int)screen_h) {
-                    int bright = (int)((1.0f - (g_Stars[i].z / 400.0f)) * 255.0f);
-                    if (bright < 0) bright = 0; if (bright > 255) bright = 255;
-                    uint32_t col = (bright << 16) | (bright << 8) | bright;
-                    eid_draw_rect(backbuffer, screen_w, screen_h, sx, sy, 2, 2, col);
+                // Проекция 3D -> 2D
+                float x = (g_Stars[i].x / g_Stars[i].z) * 100.0f + cx;
+                float y = (g_Stars[i].y / g_Stars[i].z) * 100.0f + cy;
+                
+                float px = (g_Stars[i].x / g_Stars[i].prev_z) * 100.0f + cx;
+                float py = (g_Stars[i].y / g_Stars[i].prev_z) * 100.0f + cy;
+
+                if (x >= 0 && x < screen_w && y >= 0 && y < screen_h) {
+                    // Яркость зависит от расстояния (Z)
+                    uint8_t bright = (uint8_t)(255.0f * (1.0f - g_Stars[i].z / 1000.0f));
+                    uint32_t color = (bright << 16) | (bright << 8) | bright;
+                    
+                    // Рисуем "луч" (line) от предыдущей позиции к текущей для эффекта скорости
+                    eid_draw_line(backbuffer, screen_w, screen_h, (int)px, (int)py, (int)x, (int)y, color);
                 }
             }
         } else {
-            // Рисуем градиент темы
+            // Рисуем Sonoma-градиент
             Theme t = g_Themes[g_CurrentThemeIdx];
-            eid_draw_gradient_rect(backbuffer, screen_w, screen_h, 0, 0, screen_w, screen_h, t.c1, t.c2, true);
+            eid_draw_gradient_rect(backbuffer, screen_w, screen_h, 0, 0, screen_w, screen_h, t.top_color, t.bottom_color, true);
+            
+            // Добавляем легкое акриловое пятно в углу для глубины
+            draw_acrylic_blur(screen_w - 400, -100, 500, 500, 0.2f, 250, 0xFFFFFF);
         }
     }
 
     void NextTheme() {
         g_CurrentThemeIdx = (g_CurrentThemeIdx + 1) % 3;
+        sysgui_mark_dirty(0, 0, screen_w, screen_h);
     }
 
     bool IsScreensaverActive() {
