@@ -7,7 +7,7 @@
 namespace GUI {
     class PaintApp : public App {
     private:
-        static const int MAX_POINTS = 2048;
+        static const int MAX_POINTS = 4096;
         ImVec2   points[MAX_POINTS];
         uint32_t colors[MAX_POINTS];
         float    sizes[MAX_POINTS];
@@ -17,7 +17,7 @@ namespace GUI {
         float    brush_size;
 
     public:
-        PaintApp();
+        PaintApp(uint32_t id);
         virtual ~PaintApp() {}
 
         void OnRender(float dt) override;
