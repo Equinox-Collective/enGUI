@@ -174,6 +174,68 @@ static inline float cross_product(ImVec2 a, ImVec2 b, ImVec2 c) {
     return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
 }
 
+// ПРОГРАММНЫЙ РАСЧЕТ МЯГКОЙ ТЕНИ НА ОСНОВЕ SDF (SIGNED DISTANCE FIELD) ДЛЯ ROUNDED RECT
+void draw_soft_shadow(int x, int y, int w, int h, int radius, int shadow_radius, float max_alpha, int offset_x, int offset_y) {
+    if (!draw_target || w <= 0 || h <= 0 || shadow_radius <= 0) return;
+    
+    // Границы области тени
+    int sx = x + offset_x - shadow_radius;
+    int sy = y + offset_y - shadow_radius;
+    int sw = w + 2 * shadow_radius;
+    int sh = h + 2 * shadow_radius;
+    
+    float cx = x + w / 2.0f;
+    float cy = y + h / 2.0f;
+    float dx = w / 2.0f - radius;
+    float dy = h / 2.0f - radius;
+    
+    for (int py = sy; py < sy + sh; py++) {
+        if (py < 0 || py >= (int)screen_h) continue;
+        uint32_t* row = &draw_target[py * screen_w];
+        
+        for (int px = sx; px < sx + sw; px++) {
+            if (px < 0 || px >= (int)screen_w) continue;
+            
+            // 1. Оптимизация: Пропускаем пиксели внутри исходного скругленного прямоугольника,
+            // так как поверх все равно нарисуется сам объект (окно/док)
+            float rx = fabsf(px - cx);
+            float ry = fabsf(py - cy);
+            float rtx = rx - dx; if (rtx < 0) rtx = 0;
+            float rty = ry - dy; if (rty < 0) rty = 0;
+            if (sqrtf(rtx * rtx + rty * rty) - radius < -0.5f) {
+                continue;
+            }
+            
+            // 2. Расстояние до смещенного прямоугольника тени
+            float vx = fabsf((px - offset_x) - cx);
+            float vy = fabsf((py - offset_y) - cy);
+            float tx = vx - dx; if (tx < 0) tx = 0;
+            float ty = vy - dy; if (ty < 0) ty = 0;
+            
+            float dist = sqrtf(tx * tx + ty * ty) - radius;
+            
+            if (dist < shadow_radius) {
+                float t = dist / (float)shadow_radius;
+                if (t < 0.0f) t = 0.0f;
+                // Мягкий спад тени с использованием кубического сглаживания (Smoothstep-подобный)
+                float factor = (1.0f - t * t * (3.0f - 2.0f * t)) * max_alpha;
+                
+                uint32_t bg = row[px];
+                int br = (bg >> 16) & 0xFF;
+                int bg_g = (bg >> 8) & 0xFF;
+                int bb = bg & 0xFF;
+                
+                int a = (int)(factor * 255.0f);
+                int res_r = (br * (255 - a)) >> 8;
+                int res_g = (bg_g * (255 - a)) >> 8;
+                int res_b = (bb * (255 - a)) >> 8;
+                
+                row[px] = (res_r << 16) | (res_g << 8) | res_b;
+            }
+        }
+    }
+}
+
 // ВЫСОКОКАЧЕСТВЕННЫЙ БИЛИНИЙНЫЙ ТЕКСТУРНЫЙ СЭМПЛЕР ДЛЯ СГЛАЖИВАНИЯ ШРИФТОВ
 static inline uint8_t sample_font_bilinear(const uint8_t* pixels, int tex_w, int tex_h, float u, float v) {
     if (!pixels) return 255;
@@ -199,6 +261,7 @@ static inline uint8_t sample_font_bilinear(const uint8_t* pixels, int tex_w, int
     return (uint8_t)val;
 }
 
+// РАСТЕРИЗАТОР С ПОДДЕРЖКОЙ 4x MULTI-SAMPLE ANTI-ALIASING (MSAA) НА ГРАНИЦАХ ТРЕУГОЛЬНИКОВ
 void api_render_imgui_data(void* draw_data_ptr) {
     ImDrawData* draw_data = (ImDrawData*)draw_data_ptr;
     ImGuiIO& io = ImGui::GetIO();
@@ -206,6 +269,10 @@ void api_render_imgui_data(void* draw_data_ptr) {
     int tex_w = 0, tex_h = 0;
     
     io.Fonts->GetTexDataAsAlpha8(&tex_pixels, &tex_w, &tex_h);
+
+    // Смещения 4-х субпикселей для MSAA (Сетка 2x2 в пределах пикселя)
+    const float sub_x[4] = { 0.25f, 0.75f, 0.25f, 0.75f };
+    const float sub_y[4] = { 0.25f, 0.25f, 0.75f, 0.75f };
 
     for (int n = 0; n < draw_data->CmdListsCount; n++) {
         const ImDrawList* cmd_list = draw_data->CmdLists[n];
@@ -221,16 +288,17 @@ void api_render_imgui_data(void* draw_data_ptr) {
                 const ImDrawVert& v2 = vtx_buffer[idx_buffer[pcmd->IdxOffset + i + 1]];
                 const ImDrawVert& v3 = vtx_buffer[idx_buffer[pcmd->IdxOffset + i + 2]];
 
-                int min_x = (int)ImMin(v1.pos.x, ImMin(v2.pos.x, v3.pos.x));
-                int max_x = (int)ImMax(v1.pos.x, ImMax(v2.pos.x, v3.pos.x));
-                int min_y = (int)ImMin(v1.pos.y, ImMin(v2.pos.y, v3.pos.y));
-                int max_y = (int)ImMax(v1.pos.y, ImMax(v2.pos.y, v3.pos.y));
+                // Расширяем рамку на 1 пиксель для учета субпиксельного покрытия по краям
+                int min_x = (int)ImMin(v1.pos.x, ImMin(v2.pos.x, v3.pos.x)) - 1;
+                int max_x = (int)ImMax(v1.pos.x, ImMax(v2.pos.x, v3.pos.x)) + 1;
+                int min_y = (int)ImMin(v1.pos.y, ImMin(v2.pos.y, v3.pos.y)) - 1;
+                int max_y = (int)ImMax(v1.pos.y, ImMax(v2.pos.y, v3.pos.y)) + 1;
 
                 min_x = ImMax(min_x, (int)clip.x); max_x = ImMin(max_x, (int)clip.z);
                 min_y = ImMax(min_y, (int)clip.y); max_y = ImMin(max_y, (int)clip.w);
 
                 float area = cross_product(v1.pos, v2.pos, v3.pos);
-                if (area == 0) continue;
+                if (area == 0.0f) continue;
 
                 for (int py = min_y; py < max_y; py++) {
                     if (py < 0 || py >= (int)screen_h) continue;
@@ -238,21 +306,53 @@ void api_render_imgui_data(void* draw_data_ptr) {
                     for (int px = min_x; px < max_x; px++) {
                         if (px < 0 || px >= (int)screen_w) continue;
                         
-                        ImVec2 p((float)px, (float)py);
-                        float w1 = cross_product(v2.pos, v3.pos, p) / area;
-                        float w2 = cross_product(v3.pos, v1.pos, p) / area;
-                        float w3 = 1.0f - w1 - w2;
+                        int inside_count = 0;
+                        float sum_w1 = 0.0f;
+                        float sum_w2 = 0.0f;
 
-                        if (w1 >= 0 && w2 >= 0 && w3 >= 0) {
+                        // Оцениваем вхождение каждого из 4 субпикселей
+                        for (int s = 0; s < 4; s++) {
+                            ImVec2 sub_p((float)px + sub_x[s], (float)py + sub_y[s]);
+                            float w1 = cross_product(v2.pos, v3.pos, sub_p) / area;
+                            float w2 = cross_product(v3.pos, v1.pos, sub_p) / area;
+                            float w3 = 1.0f - w1 - w2;
+
+                            // Небольшой допуск по краям для исключения пробелов точности float
+                            if (w1 >= -1e-4f && w2 >= -1e-4f && w3 >= -1e-4f) {
+                                inside_count++;
+                                sum_w1 += w1;
+                                sum_w2 += w2;
+                            }
+                        }
+
+                        if (inside_count > 0) {
+                            // Вычисляем усредненные барицентрические координаты внутри покрытой зоны
+                            float w1 = sum_w1 / inside_count;
+                            float w2 = sum_w2 / inside_count;
+                            float w3 = 1.0f - w1 - w2;
+
+                            if (w1 < 0.0f) w1 = 0.0f;
+                            if (w2 < 0.0f) w2 = 0.0f;
+                            if (w3 < 0.0f) w3 = 0.0f;
+                            float sum = w1 + w2 + w3;
+                            if (sum > 0.0f) {
+                                w1 /= sum;
+                                w2 /= sum;
+                                w3 /= sum;
+                            }
+
                             float tu = w1 * v1.uv.x + w2 * v2.uv.x + w3 * v3.uv.x;
                             float tv = w1 * v1.uv.y + w2 * v2.uv.y + w3 * v3.uv.y;
 
-                            // Сэмплирование шрифта с использованием билинейного фильтра
+                            // Сэмплируем текстуру шрифта с билинейной фильтрацией
                             uint8_t tex_alpha = sample_font_bilinear(tex_pixels, tex_w, tex_h, tu, tv);
 
                             ImU32 col = v1.col;
                             int vertex_alpha = (col >> 24) & 0xFF;
                             int a = (vertex_alpha * tex_alpha) / 255;
+                            
+                            // Модулируем альфу покрытием пикселя (coverage / 4)
+                            a = (a * inside_count) / 4;
                             if (a == 0) continue;
 
                             int r = (col & 0xFF), g = (col >> 8) & 0xFF, b = (col >> 16) & 0xFF;

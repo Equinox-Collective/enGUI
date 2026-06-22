@@ -16,9 +16,9 @@ extern uint32_t screen_w, screen_h;
 namespace GUI {
 
     static const Theme g_Themes[] = {
-        { 0x1F2235, 0x121420, "Sonoma Pro Dark" },
-        { 0x180A2B, 0x07020E, "Aurora Borealis" },
-        { 0x071B20, 0x03080A, "Aqua Deep" }
+        { 0x050510, 0x020205, "Cosmic Void" },
+        { 0x1A082C, 0x080210, "Nebula Dust" },
+        { 0x051E28, 0x02070D, "Solar Flare" }
     };
 
     static int g_CurrentThemeIdx = 0;
@@ -76,6 +76,7 @@ namespace GUI {
         int start_y = 60;
 
         // 1. ВИДЖЕТ ЧАСОВ (Стеклянная подложка + красивый дизайн)
+        draw_soft_shadow(start_x, start_y, widget_w, widget_h, WIDGET_ROUNDING, 12, 0.25f, 0, 4);
         draw_acrylic_blur(start_x, start_y, widget_w, widget_h, 0.5f, WIDGET_ROUNDING, 0x1E2235);
         
         ImGui::SetNextWindowPos(ImVec2((float)start_x, (float)start_y));
@@ -109,6 +110,7 @@ namespace GUI {
 
         // 2. ВИДЖЕТ СТАТИСТИКИ РЕСУРСОВ
         start_y += widget_h + 30;
+        draw_soft_shadow(start_x, start_y, widget_w, widget_h, WIDGET_ROUNDING, 12, 0.25f, 0, 4);
         draw_acrylic_blur(start_x, start_y, widget_w, widget_h, 0.5f, WIDGET_ROUNDING, 0x1E2235);
 
         ImGui::SetNextWindowPos(ImVec2((float)start_x, (float)start_y));

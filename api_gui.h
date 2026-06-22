@@ -4,17 +4,18 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// --- SONOMA DESIGN SYSTEM CONSTANTS ---
-#define COLOR_ACCENT          0x007AFF  // Классический macOS Accent Blue
-#define COLOR_GLASS_TINT      0x0A0C16  // Глубокий темный стеклянный тон
-#define COLOR_BORDER_LIGHT    0x3A3F4D  // Светлая обводка для создания объема
-#define COLOR_BORDER_DARK     0x1A1C25  // Темная контрастная граница
-#define COLOR_TEXT_PRIMARY    0xF5F5F7  // Яркий контрастный текст (San Francisco style)
-#define COLOR_TEXT_MUTED      0x8E8E93  // Приглушенный текст для второстепенных данных
+// --- EQUINOXOS COSMIC CYBER DESIGN SYSTEM CONSTANTS ---
+#define COLOR_ACCENT          0xBD00FF  // Galactic Neon Purple / Violet
+#define COLOR_ACCENT_CYAN     0x00E5FF  // Cosmic Cyan
+#define COLOR_GLASS_TINT      0x030206  // Deep Space Dark Void Glass Tone
+#define COLOR_BORDER_LIGHT    0x3A3F4D  
+#define COLOR_BORDER_DARK     0x1A1C25  
+#define COLOR_TEXT_PRIMARY    0xF0F5FF  // Cyber white
+#define COLOR_TEXT_MUTED      0x708090  // Space slate gray
 
-#define WINDOW_ROUNDING_LARGE 16
-#define DOCK_ROUNDING         20
-#define WIDGET_ROUNDING       18
+#define WINDOW_ROUNDING_LARGE 4
+#define DOCK_ROUNDING         6
+#define WIDGET_ROUNDING       4
 
 #ifdef __cplusplus
 extern "C" {
@@ -33,8 +34,8 @@ bool play_wav_file(const char *filename);
  */
 // Отрисовка размытия с адаптивной субдискретизацией и наложением шума (гранулярности)
 void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, uint32_t tint_rgb);
-// Программный расчет мягкой тени (гауссово приближение)
-void draw_soft_shadow(int x, int y, int w, int h, int strength);
+// Программный расчет мягкой тени (гауссово приближение на основе SDF)
+void draw_soft_shadow(int x, int y, int w, int h, int radius, int shadow_radius, float max_alpha, int offset_x, int offset_y);
 // Пометка грязных областей экрана (оптимизация обновления VRAM)
 void sysgui_mark_dirty(int x, int y, int w, int h);
 

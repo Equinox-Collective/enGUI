@@ -2,6 +2,7 @@
 #include "../api_gui.h"
 #include "../imgui/imgui.h"
 #include "desktop.h"
+#include "win_manager.h"
 
 extern "C" {
 #include <equos.h>
@@ -13,8 +14,11 @@ extern uint32_t screen_w;
 namespace GUI {
 
     void RenderTopPanel() {
-        // Увеличен размер верхней строки до 28px для идеальной разметки
-        draw_acrylic_blur(0, 0, screen_w, 28, 0.45f, 0, 0x0A0C16);
+        // Soft drop shadow for Top Panel (radius=0, shadow_radius=8, alpha=0.3f, offsets=(0, 2))
+        draw_soft_shadow(0, 0, screen_w, 28, 0, 8, 0.3f, 0, 2);
+
+        // Увеличен размер верхней строки до 28px для идеальной разметки (в космо-темном стиле)
+        draw_acrylic_blur(0, 0, screen_w, 28, 0.50f, 0, 0x030206);
 
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2((float)screen_w, 28));
@@ -28,13 +32,13 @@ namespace GUI {
         {
             ImDrawList* draw = ImGui::GetWindowDrawList();
 
-            // EQ Меню ("Яблоко" системы)
+            // EQ Меню (Главный неоновый логотип системы)
             ImGui::SetCursorPos(ImVec2(15, 2));
             ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(4, 2));
-            if (ImGui::BeginMenu("  EQ  ")) {
+            if (ImGui::BeginMenu(" ʘ EQUINOX ")) {
                 if (ImGui::MenuItem("About EquinoxOS...")) {}
                 ImGui::Separator();
-                if (ImGui::MenuItem("Sonoma Settings...")) {}
+                if (ImGui::MenuItem("Equinox Settings...")) {}
                 if (ImGui::MenuItem("Next Desktop Theme")) { NextTheme(); }
                 ImGui::Separator();
                 if (ImGui::MenuItem("Sleep System", "Alt+S")) {}
@@ -43,17 +47,23 @@ namespace GUI {
             }
             ImGui::PopStyleVar();
 
-            // Активное приложение в фокусе (крупно и сочно)
-            ImGui::SameLine(75);
-            ImGui::SetCursorPosY(4);
-            ImGui::TextColored(ImVec4(1, 1, 1, 0.95f), "Finder");
+            // Активное приложение в фокусе (динамическое и неоновое)
+            const char* active_title = "Equinox Desktop";
+            App* active_app = GetActiveApp();
+            if (active_app && active_app->is_open) {
+                active_title = active_app->title;
+            }
 
-            // Информационное меню системы
-            ImGui::SameLine(145);
+            ImGui::SameLine(135);
+            ImGui::SetCursorPosY(4);
+            ImGui::TextColored(ImVec4(0.00f, 0.90f, 1.00f, 1.00f), "%s", active_title);
+
+            // Информационное меню системы (сдвинуто вправо под динамический заголовок)
+            ImGui::SameLine(280);
             if (ImGui::BeginMenu("File")) { ImGui::EndMenu(); }
-            ImGui::SameLine(190);
+            ImGui::SameLine(325);
             if (ImGui::BeginMenu("Edit")) { ImGui::EndMenu(); }
-            ImGui::SameLine(235);
+            ImGui::SameLine(370);
             if (ImGui::BeginMenu("View")) { ImGui::EndMenu(); }
 
             // --- ПРАВАЯ ЧАСТЬ (Индикаторы состояния с высоким контрастом) ---
@@ -69,18 +79,18 @@ namespace GUI {
             float time_width = ImGui::CalcTextSize(time_str).x;
             ImGui::SameLine(screen_w - time_width - 20);
             ImGui::SetCursorPosY(4);
-            ImGui::TextColored(ImVec4(0.96f, 0.96f, 0.97f, 1.00f), "%s", time_str);
+            ImGui::TextColored(ImVec4(0.92f, 0.96f, 1.00f, 1.00f), "%s", time_str);
 
-            // Контрастный индикатор заряда батарейки
+            // Контрастный индикатор заряда батарейки (неоновый циан)
             float battery_x = screen_w - time_width - 70;
             ImGui::SameLine(battery_x);
             
             ImVec2 cur_pos = ImGui::GetCursorScreenPos();
-            draw->AddRectFilled(ImVec2(cur_pos.x, 8), ImVec2(cur_pos.x + 22, 20), 0xFF28C76F, 3.0f);
-            draw->AddRectFilled(ImVec2(cur_pos.x + 22, 11), ImVec2(cur_pos.x + 24, 17), 0xFF28C76F, 1.0f);
+            draw->AddRectFilled(ImVec2(cur_pos.x, 8), ImVec2(cur_pos.x + 22, 20), 0xFF00E5FF, 2.0f);
+            draw->AddRectFilled(ImVec2(cur_pos.x + 22, 11), ImVec2(cur_pos.x + 24, 17), 0xFF00E5FF, 1.0f);
             
-            // Тонкая стильная линия разделения внизу панели
-            draw->AddLine(ImVec2(0, 27), ImVec2((float)screen_w, 27), 0x22FFFFFF, 1.0f);
+            // Тонкая стильная линия разделения внизу панели (неоновый циан)
+            draw->AddLine(ImVec2(0, 27), ImVec2((float)screen_w, 27), 0x3300E5FF, 1.0f);
         }
         ImGui::End();
     }

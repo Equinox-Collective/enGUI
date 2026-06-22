@@ -2,6 +2,7 @@
 #define GUI_WIN_MANAGER_H
 
 namespace GUI {
+    class App;
     void InitWindowManager();
     void RenderWindows(float dt);
     
@@ -10,6 +11,9 @@ namespace GUI {
     
     // Проверка, запущено ли приложение (для индикаторов в доке)
     bool IsAppActive(const char* title);
+
+    // Получение активного окна
+    App* GetActiveApp();
 }
 
 #endif

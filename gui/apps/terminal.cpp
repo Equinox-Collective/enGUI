@@ -16,7 +16,7 @@ namespace GUI {
         log_size = 0;
         scroll_to_bottom = false;
         
-        AddLog("EquinoxOS Sonoma Shell v1.4");
+        AddLog("EquinoxOS Terminal Shell v1.5");
         AddLog("Type 'help' for system instructions.");
         AddLog("");
     }
@@ -52,8 +52,8 @@ namespace GUI {
         } 
         else if (strcmp(cmd, "neofetch") == 0) {
             AddLog("  .-.    OS: EquinoxOS x86_64");
-            AddLog("  oo|    Kernel: Sonoma-Ring3-v1.4");
-            AddLog(" /` _\\   Shell: Eqsh v1.4");
+            AddLog("  oo|    Kernel: Equinox-Core-v1.5");
+            AddLog(" /` _\\   Shell: Eqsh v1.5");
             AddLog(" \\_\\     Memory: %llu MB used", sys_get_used_mem() / (1024*1024));
         } 
         else if (strcmp(cmd, "whoami") == 0) {

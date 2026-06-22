@@ -21,10 +21,10 @@ namespace GUI {
     };
 
     static DockApp g_DockApps[] = {
-        { "Finder",    0x007AFF, true },
+        { "Navigator", 0xBD00FF, true },
         { "Terminal",  0x1C1D22, true },
-        { "Monitor",   0x28C76F, true },
-        { "Paint",     0xFF9F43, true }
+        { "Monitor",   0x00E5FF, true },
+        { "Paint",     0xFF007F, true }
     };
     static const int DOCK_COUNT = sizeof(g_DockApps) / sizeof(DockApp);
     static float g_IconScales[DOCK_COUNT];
@@ -42,19 +42,19 @@ namespace GUI {
         draw->AddRectFilled(p1, p2, 0xFF14161F, 14.0f);
         draw->AddRect(p1, p2, 0x44FFFFFF, 14.0f, 0, 1.5f);
 
-        if (strcmp(name, "Finder") == 0) {
-            // macOS Finder Style Face
-            float eye_offset = 8.0f * scale;
-            float eye_size = 3.0f * scale;
+        if (strcmp(name, "Navigator") == 0) {
+            // Equinox Astronomical Orbit Icon
+            float r_center = 11.0f * scale;
+            // Draw central planet (glowing purple/cyan sphere)
+            draw->AddCircleFilled(center, r_center, 0xDD00E5FF); // Glowing cyan
+            draw->AddCircle(center, r_center + 1.0f * scale, 0xFFBD00FF, 32, 1.0f); // Purple orbit halo
             
-            // Смайлик-лицо разделенное линией посередине
-            draw->AddLine(ImVec2(center.x, p1.y + 8), ImVec2(center.x, p2.y - 8), 0xFFFFFFFF, 2.0f);
-            draw->AddCircleFilled(ImVec2(center.x - eye_offset, center.y - eye_offset), eye_size, 0xFF007AFF);
-            draw->AddCircleFilled(ImVec2(center.x + eye_offset, center.y - eye_offset), eye_size, 0xFF007AFF);
+            // Draw angled orbit ring
+            draw->AddCircle(center, 18.0f * scale, 0xBBFFFFFF, 32, 1.2f);
             
-            // Улыбка
-            draw->AddLine(ImVec2(center.x - 10 * scale, center.y + 8 * scale), 
-                          ImVec2(center.x + 10 * scale, center.y + 8 * scale), 0xFF007AFF, 2.0f);
+            // Draw a small moon on the orbit
+            ImVec2 moon_pos(center.x + 13.0f * scale, center.y - 13.0f * scale);
+            draw->AddCircleFilled(moon_pos, 4.0f * scale, 0xFFBD00FF); // Purple moon
         }
         else if (strcmp(name, "Terminal") == 0) {
             // Иконка консоли '>_'
@@ -96,8 +96,11 @@ namespace GUI {
         int dock_x = (screen_w - (int)total_w) / 2;
         int dock_y = screen_h - dock_h - 15; 
 
-        // Акриловая стеклянная подложка
-        draw_acrylic_blur(dock_x, dock_y, (int)total_w, dock_h, 0.45f, DOCK_ROUNDING, 0x14161F);
+        // Soft drop shadow for Dock (radius=6, shadow_radius=16, alpha=0.45f, offsets=(0, 6))
+        draw_soft_shadow(dock_x, dock_y, (int)total_w, dock_h, DOCK_ROUNDING, 16, 0.45f, 0, 6);
+        
+        // Акриловая стеклянная подложка (космическая темная бездна)
+        draw_acrylic_blur(dock_x, dock_y, (int)total_w, dock_h, 0.55f, DOCK_ROUNDING, 0x030206);
         
         ImGui::SetNextWindowPos(ImVec2((float)dock_x, (float)dock_y));
         ImGui::SetNextWindowSize(ImVec2(total_w, (float)dock_h));
@@ -105,8 +108,9 @@ namespace GUI {
         {
             ImDrawList* draw = ImGui::GetWindowDrawList();
             
-            // Тонкая стильная окантовка дока сверху
-            draw->AddLine(ImVec2((float)dock_x, (float)dock_y), ImVec2((float)dock_x + total_w, (float)dock_y), 0x33FFFFFF, 1.5f);
+            // Свечение рамки дока в стиле кибер-консоли (неоновый циан)
+            draw->AddRect(ImVec2(dock_x, dock_y), ImVec2(dock_x + total_w, dock_y + dock_h), 0x5500E5FF, DOCK_ROUNDING, 0, 1.0f);
+            draw->AddLine(ImVec2((float)dock_x, (float)dock_y), ImVec2((float)dock_x + total_w, (float)dock_y), 0xCC00E5FF, 1.5f);
 
             float current_x = (float)dock_x + pad;
 
@@ -132,9 +136,9 @@ namespace GUI {
                 // Рендерим иконку векторами
                 DrawVectorIcon(draw, p1, p2, g_DockApps[i].name, g_IconScales[i]);
 
-                // Индикатор того, что приложение запущено (точка снизу)
+                // Индикатор того, что приложение запущено (точка снизу - неоновый циан)
                 if (IsAppActive(g_DockApps[i].name)) {
-                    draw->AddCircleFilled(ImVec2(icon_center_x, (float)dock_y + dock_h - 7), 3.0f, 0xFF007AFF);
+                    draw->AddCircleFilled(ImVec2(icon_center_x, (float)dock_y + dock_h - 7), 3.0f, 0xFF00E5FF);
                 }
 
                 // ПОДСКАЗКА С ИМЕНЕМ ПРИЛОЖЕНИЯ (Эстетичный стеклянный тултип)

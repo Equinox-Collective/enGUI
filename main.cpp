@@ -60,6 +60,50 @@ static inline void get_mouse_state(int* mx, int* my, bool* mdown) {
     *mdown = (r_btn & 1);
 }
 
+// 19x27 macOS Sonoma-style cursor with custom anti-aliased edge blending and its own soft shadow
+static const int CURSOR_W = 19;
+static const int CURSOR_H = 27;
+
+static const char* s_CursorSprite[27] = {
+    "d..................",
+    "Bds................",
+    "BWd................",
+    "BWWds..............",
+    "BWWWd..............",
+    "BWWWWB.............",
+    "BWWWWd.............",
+    "BWWWWWB............",
+    "BWWWWWd............",
+    "BWWWWWWd...........",
+    "BWWWWWWWB..........",
+    "BWWWWWWWd..........",
+    "BWWWWWWWWd.........",
+    "BWWWWWWWWWB........",
+    "BWWWWWWWWWd........",
+    "BWWWWWWWWWWd.......",
+    "BWWWWWWBBBBds......",
+    "BWWWWBWd.s.........",
+    "BWWWB.Bd.s.........",
+    "BWWB..Bd.s.........",
+    "BWB....Bd.s........",
+    "B......Bd.s........",
+    "s.......Bd.s.......",
+    "........Bd.s.......",
+    ".........ds........",
+    "..........s........",
+    "..................."
+};
+
+static inline uint32_t get_cursor_pixel(char c) {
+    switch (c) {
+        case 'B': return 0xFF000000; // Черная кайма
+        case 'd': return 0x99000000; // Полупрозрачная черная кайма (сглаживание)
+        case 'W': return 0xFFFFFFFF; // Белое тело
+        case 's': return 0x2A000000; // Мягкая тень курсора
+        case '.': default: return 0x00000000; // Прозрачный
+    }
+}
+
 int main(int argc, char **argv) {
     uint64_t phys_fb = 0;
     uint32_t w = 0, h = 0, pitch = 0;
@@ -89,33 +133,42 @@ int main(int argc, char **argv) {
         _syscall(1, (uint64_t)"WARNING: Could not load Inter.ttf, fallback\n", 0, 0, 0, 0);
     }
 
-    // --- НАСТРОЙКА СТИЛЯ MACOS SONOMA SYSTEM ---
+    // --- НАСТРОЙКА СТИЛЯ FUTURISTIC CYBER EQUINOXOS ---
     ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = WINDOW_ROUNDING_LARGE;
-    style.FrameRounding = 8.0f;
-    style.GrabRounding = 6.0f;
-    style.ScrollbarRounding = 10.0f;
-    style.ScrollbarSize = 8.0f; // Сделали скроллбар узким и аккуратным
-    style.WindowBorderSize = 0.0f;
-    style.FrameBorderSize = 0.0f;
+    style.WindowRounding = WINDOW_ROUNDING_LARGE; // Используем обновленный WINDOW_ROUNDING_LARGE (4.0f)
+    style.FrameRounding = 2.0f;
+    style.GrabRounding = 2.0f;
+    style.ScrollbarRounding = 4.0f;
+    style.ScrollbarSize = 10.0f;
+    style.WindowBorderSize = 1.0f;
+    style.FrameBorderSize = 1.0f;
+    style.PopupRounding = 2.0f;
 
-    // Цвета с отличным контрастом
-    style.Colors[ImGuiCol_WindowBg]             = ImVec4(0.08f, 0.09f, 0.15f, 0.0f); // Прозрачный под блюр
-    style.Colors[ImGuiCol_Text]                 = ImVec4(0.96f, 0.96f, 0.97f, 1.00f); // Ярко-белый/светло-серый
-    style.Colors[ImGuiCol_TextDisabled]         = ImVec4(0.55f, 0.55f, 0.57f, 1.00f);
-    style.Colors[ImGuiCol_Header]               = ImVec4(0.00f, 0.48f, 1.00f, 0.40f); // Акцентный синий
-    style.Colors[ImGuiCol_HeaderActive]         = ImVec4(0.00f, 0.48f, 1.00f, 0.80f);
-    style.Colors[ImGuiCol_HeaderHovered]        = ImVec4(0.00f, 0.48f, 1.00f, 0.60f);
-    style.Colors[ImGuiCol_Button]               = ImVec4(0.18f, 0.20f, 0.28f, 0.80f); // Контрастные кнопки
-    style.Colors[ImGuiCol_ButtonHovered]        = ImVec4(0.00f, 0.48f, 1.00f, 0.85f);
-    style.Colors[ImGuiCol_ButtonActive]         = ImVec4(0.00f, 0.38f, 0.85f, 1.00f);
-    style.Colors[ImGuiCol_FrameBg]              = ImVec4(0.12f, 0.14f, 0.22f, 0.80f);
-    style.Colors[ImGuiCol_FrameBgHovered]       = ImVec4(0.18f, 0.21f, 0.32f, 0.80f);
-    style.Colors[ImGuiCol_FrameBgActive]        = ImVec4(0.24f, 0.27f, 0.40f, 0.80f);
-    style.Colors[ImGuiCol_ScrollbarBg]          = ImVec4(0.05f, 0.05f, 0.10f, 0.20f);
-    style.Colors[ImGuiCol_ScrollbarGrab]        = ImVec4(0.35f, 0.35f, 0.45f, 0.50f);
-    style.Colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.45f, 0.45f, 0.55f, 0.70f);
-    style.Colors[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.00f, 0.48f, 1.00f, 0.80f);
+    // Цвета космической бездны и неонового кибера
+    style.Colors[ImGuiCol_WindowBg]             = ImVec4(0.03f, 0.02f, 0.06f, 0.0f); // Прозрачный под блюр
+    style.Colors[ImGuiCol_Border]               = ImVec4(0.00f, 0.90f, 1.00f, 0.25f); // Тонкий неоновый циан
+    style.Colors[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+    style.Colors[ImGuiCol_Text]                 = ImVec4(0.92f, 0.96f, 1.00f, 1.00f); // Кибер-белый с голубым отливом
+    style.Colors[ImGuiCol_TextDisabled]         = ImVec4(0.40f, 0.45f, 0.55f, 1.00f);
+    style.Colors[ImGuiCol_Header]               = ImVec4(0.45f, 0.00f, 0.85f, 0.45f); // Насыщенный фиолетовый
+    style.Colors[ImGuiCol_HeaderActive]         = ImVec4(0.45f, 0.00f, 0.85f, 0.80f);
+    style.Colors[ImGuiCol_HeaderHovered]        = ImVec4(0.45f, 0.00f, 0.85f, 0.65f);
+    style.Colors[ImGuiCol_Button]               = ImVec4(0.08f, 0.12f, 0.24f, 0.80f); // Темно-синие кнопки
+    style.Colors[ImGuiCol_ButtonHovered]        = ImVec4(0.00f, 0.90f, 1.00f, 0.60f); // Неоново-голубой при ховере
+    style.Colors[ImGuiCol_ButtonActive]         = ImVec4(0.00f, 0.70f, 0.80f, 1.00f);
+    style.Colors[ImGuiCol_FrameBg]              = ImVec4(0.06f, 0.07f, 0.15f, 0.80f);
+    style.Colors[ImGuiCol_FrameBgHovered]       = ImVec4(0.00f, 0.90f, 1.00f, 0.20f);
+    style.Colors[ImGuiCol_FrameBgActive]        = ImVec4(0.00f, 0.90f, 1.00f, 0.35f);
+    style.Colors[ImGuiCol_ScrollbarBg]          = ImVec4(0.02f, 0.02f, 0.05f, 0.40f);
+    style.Colors[ImGuiCol_ScrollbarGrab]        = ImVec4(0.45f, 0.00f, 0.85f, 0.40f);
+    style.Colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.45f, 0.00f, 0.85f, 0.60f);
+    style.Colors[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.00f, 0.90f, 1.00f, 0.80f);
+    style.Colors[ImGuiCol_TitleBg]              = ImVec4(0.05f, 0.04f, 0.10f, 0.90f);
+    style.Colors[ImGuiCol_TitleBgActive]        = ImVec4(0.12f, 0.05f, 0.25f, 0.95f);
+    style.Colors[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.05f, 0.04f, 0.10f, 0.70f);
+    style.Colors[ImGuiCol_CheckMark]            = ImVec4(0.00f, 0.90f, 1.00f, 1.00f);
+    style.Colors[ImGuiCol_SliderGrab]           = ImVec4(0.00f, 0.90f, 1.00f, 1.00f);
+    style.Colors[ImGuiCol_SliderGrabActive]     = ImVec4(0.00f, 0.70f, 0.80f, 1.00f);
 
     vram = (uint32_t *)_syscall(30, phys_fb, screen_w * screen_h * 4, 0, 0, 0);
     if (!vram) {
@@ -168,17 +221,27 @@ int main(int argc, char **argv) {
         api_render_imgui_data(ImGui::GetDrawData());
 
         // 6. Отрисовка софтварного сглаженного курсора
-        for(int i = 0; i < 16; i++) {
-            for(int j = 0; j < i; j++) {
-                if (j < i - 1) {
-                    int px = mx + j, py = my + i;
-                    if(px < (int)screen_w && py < (int)screen_h) {
-                        backbuffer[py * screen_w + px] = 0xFFFFFF; // Белое тело
-                    }
-                } else {
-                    int px = mx + j, py = my + i;
-                    if(px < (int)screen_w && py < (int)screen_h) {
-                        backbuffer[py * screen_w + px] = 0x000000; // Черная кайма
+        for (int i = 0; i < CURSOR_H; i++) {
+            for (int j = 0; j < CURSOR_W; j++) {
+                char c = s_CursorSprite[i][j];
+                uint32_t col = get_cursor_pixel(c);
+                int a = (col >> 24) & 0xFF;
+                if (a == 0) continue;
+                int px = mx + j;
+                int py = my + i;
+                if (px >= 0 && px < (int)screen_w && py >= 0 && py < (int)screen_h) {
+                    if (a == 255) {
+                        backbuffer[py * screen_w + px] = col & 0xFFFFFF;
+                    } else {
+                        uint32_t bg = backbuffer[py * screen_w + px];
+                        int r = (col >> 16) & 0xFF;
+                        int g = (col >> 8) & 0xFF;
+                        int b = col & 0xFF;
+                        int br = (bg >> 16) & 0xFF, bg_g = (bg >> 8) & 0xFF, bb = bg & 0xFF;
+                        int res_r = (r * a + br * (255 - a)) >> 8;
+                        int res_g = (g * a + bg_g * (255 - a)) >> 8;
+                        int res_b = (b * a + bb * (255 - a)) >> 8;
+                        backbuffer[py * screen_w + px] = (res_r << 16) | (res_g << 8) | res_b;
                     }
                 }
             }
