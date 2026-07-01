@@ -236,9 +236,13 @@ int main(int argc, char **argv) {
         // Ввод: Мышь
         get_mouse_state(&mx, &my, &mdown);
 
+        static int last_mx = 0, last_my = 0;
+        sysgui_mark_dirty(last_mx, last_my, CURSOR_W, CURSOR_H);
+        sysgui_mark_dirty(mx, my, CURSOR_W, CURSOR_H);
+        last_mx = mx;
+        last_my = my;
+
         io.MousePos = ImVec2((float)mx, (float)my);
-        io.MouseDown[0] = mdown;
-        io.DeltaTime = (dt > 0) ? dt : 0.001f;
 
         // 1. Инициализируем новый кадр Dear ImGui в самом начале цикла.
         // Это критически важно, так как фоновые виджеты рабочего стола используют контекст ImGui.
