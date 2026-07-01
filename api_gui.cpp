@@ -17,6 +17,32 @@ static int font_width = 8;
 static int font_height = 16;
 static int font_charsize = 16;
 
+static inline int clamp_int(int val, int min_val, int max_val) {
+    if (val < min_val) return min_val;
+    if (val > max_val) return max_val;
+    return val;
+}
+
+static inline bool is_pixel_masked(int tx, int ty, int w, int h, int r) {
+    if (tx < r && ty < r) {
+        int dx = r - tx, dy = r - ty;
+        return (dx * dx + dy * dy > r * r);
+    }
+    if (tx >= w - r && ty < r) {
+        int dx = tx - (w - r - 1), dy = r - ty;
+        return (dx * dx + dy * dy > r * r);
+    }
+    if (tx < r && ty >= h - r) {
+        int dx = r - tx, dy = ty - (h - r - 1);
+        return (dx * dx + dy * dy > r * r);
+    }
+    if (tx >= w - r && ty >= h - r) {
+        int dx = tx - (w - r - 1), dy = ty - (h - r - 1);
+        return (dx * dx + dy * dy > r * r);
+    }
+    return false;
+}
+
 bool load_psf_font(const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) return false;
