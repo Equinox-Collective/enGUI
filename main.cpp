@@ -40,7 +40,46 @@ void sysgui_mark_dirty(int x, int y, int w, int h) {
 }
 
 void copy_dirty_to_vram() {
-    memcpy(vram, backbuffer, screen_w * screen_h * 4);
+    if (!dirty_grid) {
+        memcpy(vram, backbuffer, screen_w * screen_h * 4);
+        return;
+    }
+
+    for (int r = 0; r < grid_rows; r++) {
+        int y_start = r * TILE_SIZE;
+        int y_end = y_start + TILE_SIZE;
+        if (y_end > (int)screen_h) y_end = screen_h;
+        int tile_h = y_end - y_start;
+
+        int c = 0;
+        while (c < grid_cols) {
+            // Ищем начало грязного отрезка тайлов
+            if (dirty_grid[r * grid_cols + c]) {
+                int c_start = c;
+                // Склеиваем идущие подряд грязные тайлы в одну строчку
+                while (c < grid_cols && dirty_grid[r * grid_cols + c]) {
+                    dirty_grid[r * grid_cols + c] = 0; // Сбрасываем грязь
+                    c++;
+                }
+                int c_end = c;
+
+                int x_start = c_start * TILE_SIZE;
+                int x_end = c_end * TILE_SIZE;
+                if (x_end > (int)screen_w) x_end = screen_w;
+                int copy_w = x_end - x_start;
+
+                // Копируем склеенный блок строк для текущего ряда тайлов
+                for (int i = 0; i < tile_h; i++) {
+                    int current_y = y_start + i;
+                    uint32_t *dst = &vram[current_y * screen_w + x_start];
+                    uint32_t *src = &backbuffer[current_y * screen_w + x_start];
+                    memcpy(dst, src, copy_w * 4);
+                }
+            } else {
+                c++;
+            }
+        }
+    }
 }
 
 static inline void get_mouse_state(int* mx, int* my, bool* mdown) {
