@@ -1,31 +1,27 @@
+// app/sysgui/gui/apps/terminal.h
 #ifndef GUI_TERMINAL_H
 #define GUI_TERMINAL_H
 
 #include "../../api_gui.h"
 
-extern "C" {
-#include <stdlib.h> 
-}
-
 namespace GUI {
     class TerminalApp : public App {
     private:
-        static const int MAX_LOG_LINES = 128;
+        static const int MAX_LOG_LINES = 16;
         char* log_lines[MAX_LOG_LINES];
         int log_size;
-        char input_buffer[128];
-        bool scroll_to_bottom;
+        char input_buffer[64];
+        int input_len;
 
         void AddLog(const char* fmt, ...);
         void ExecuteCommand(const char* cmd);
 
     public:
-        TerminalApp(uint32_t id);
-        virtual ~TerminalApp() {
-            for (int i = 0; i < log_size; i++) if (log_lines[i]) free(log_lines[i]);
-        }
+        TerminalApp(uint32_t id, int start_x, int start_y);
+        virtual ~TerminalApp();
 
-        void OnRender(float dt) override;
+        void OnRender(Painter& p, float dt) override;
+        void OnKeyEvent(uint16_t key) override;
     };
 }
 

@@ -4,8 +4,8 @@
 extern "C" {
 #include <stdlib.h>
 #include <string.h>
-#include <math.h>
 #include <stdio.h>
+#include <math.h>
 }
 
 extern uint32_t *draw_target;

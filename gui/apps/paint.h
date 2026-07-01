@@ -1,26 +1,27 @@
+// app/sysgui/gui/apps/paint.h
 #ifndef GUI_PAINT_H
 #define GUI_PAINT_H
 
-#include "../api_gui.h"
-#include "../../imgui/imgui.h"
+#include "../../api_gui.h"
 
 namespace GUI {
+    struct PaintPoint {
+        int x, y;
+        uint32_t color;
+    };
+
     class PaintApp : public App {
     private:
-        static const int MAX_POINTS = 4096;
-        ImVec2   points[MAX_POINTS];
-        uint32_t colors[MAX_POINTS];
-        float    sizes[MAX_POINTS];
-        int      point_count;
-
-        ImVec4   brush_color;
-        float    brush_size;
+        static const int MAX_POINTS = 1024;
+        PaintPoint points[MAX_POINTS];
+        int point_count;
+        uint32_t current_color;
 
     public:
-        PaintApp(uint32_t id);
+        PaintApp(uint32_t id, int start_x, int start_y);
         virtual ~PaintApp() {}
 
-        void OnRender(float dt) override;
+        void OnRender(Painter& p, float dt) override;
     };
 }
 

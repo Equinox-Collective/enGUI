@@ -1,18 +1,14 @@
+// app/sysgui/gui/win_manager.h
 #ifndef GUI_WIN_MANAGER_H
 #define GUI_WIN_MANAGER_H
 
-namespace GUI {
-    class App;
-    void InitWindowManager();
-    void RenderWindows(float dt);
-    
-    // Публичное API для открытия приложений по имени
-    void OpenAppWindow(const char* title);
-    
-    // Проверка, запущено ли приложение (для индикаторов в доке)
-    bool IsAppActive(const char* title);
+#include "../api_gui.h"
 
-    // Получение активного окна
+namespace GUI {
+    void InitWindowManager();
+    void RenderWindows(Painter& p, float dt, int mx, int my, bool mdown, uint16_t key);
+    void OpenAppWindow(const char* title);
+    bool IsAppActive(const char* title);
     App* GetActiveApp();
 }
 
