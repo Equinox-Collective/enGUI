@@ -1,7 +1,8 @@
+// app/sysgui/gui/desktop.h
 #ifndef GUI_DESKTOP_H
 #define GUI_DESKTOP_H
 
-#include <stdint.h>
+#include "../api_gui.h"
 
 namespace GUI {
     struct Theme {
@@ -12,7 +13,7 @@ namespace GUI {
 
     void InitDesktop();
     void UpdateDesktop(float dt, int mx, int my, bool mdown, uint16_t key);
-    void RenderDesktop();
+    void RenderDesktop(Painter& p);
     void NextTheme();
     bool IsScreensaverActive();
 }

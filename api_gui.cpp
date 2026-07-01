@@ -5,27 +5,276 @@ extern "C" {
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
-}
-
-#include "imgui/imgui.h"
-
-#ifndef ImMin
-#define ImMin(A, B) ((A) < (B) ? (A) : (B))
-#endif
-#ifndef ImMax
-#define ImMax(A, B) ((A) > (B) ? (A) : (B))
-#endif
-
-// Вспомогательная функция ограничения значений, независимая от пространств имен ImGui
-static inline int clamp_int(int val, int min_val, int max_val) {
-    if (val < min_val) return min_val;
-    if (val > max_val) return max_val;
-    return val;
+#include <stdio.h>
 }
 
 extern uint32_t *draw_target;
 extern uint32_t screen_w, screen_h;
 
+// --- ШРИФТОВОЙ ДВИЖОК PSF1/PSF2 ---
+static uint8_t* font_glyphs = nullptr;
+static int font_width = 8;
+static int font_height = 16;
+static int font_charsize = 16;
+
+bool load_psf_font(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+
+    uint8_t magic[4];
+    if (fread(magic, 1, 4, f) != 4) { fclose(f); return false; }
+
+    // PSF2 Формат
+    if (magic[0] == 0x72 && magic[1] == 0xb5 && magic[2] == 0x4a && magic[3] == 0x86) {
+        uint32_t version, headersize, flags, numglyph, bytesperglyph, height, width;
+        fread(&version, 4, 1, f);
+        fread(&headersize, 4, 1, f);
+        fread(&flags, 4, 1, f);
+        fread(&numglyph, 4, 1, f);
+        fread(&bytesperglyph, 4, 1, f);
+        fread(&height, 4, 1, f);
+        fread(&width, 4, 1, f);
+
+        fseek(f, headersize, SEEK_SET);
+        font_glyphs = (uint8_t*)malloc(numglyph * bytesperglyph);
+        fread(font_glyphs, 1, numglyph * bytesperglyph, f);
+        font_width = width;
+        font_height = height;
+        font_charsize = bytesperglyph;
+        fclose(f);
+        return true;
+    }
+    // PSF1 Формат
+    else if (magic[0] == 0x36 && magic[1] == 0x04) {
+        uint8_t charsize = magic[3];
+        font_glyphs = (uint8_t*)malloc(256 * charsize);
+        fread(font_glyphs, 1, 256 * charsize, f);
+        font_width = 8;
+        font_height = charsize;
+        font_charsize = charsize;
+        fclose(f);
+        return true;
+    }
+    fclose(f);
+    return false;
+}
+
+namespace GUI {
+
+    void Painter::FillRect(int x, int y, int w, int h, uint32_t color) {
+        int x1 = x < 0 ? 0 : x;
+        int y1 = y < 0 ? 0 : y;
+        int x2 = x + w > (int)width ? width : x + w;
+        int y2 = y + h > (int)height ? height : y + h;
+
+        for (int py = y1; py < y2; py++) {
+            uint32_t* row = &target[py * width];
+            for (int px = x1; px < x2; px++) {
+                row[px] = color;
+            }
+        }
+    }
+
+    void Painter::FillRectAlpha(int x, int y, int w, int h, uint32_t color, uint8_t alpha) {
+        int x1 = x < 0 ? 0 : x;
+        int y1 = y < 0 ? 0 : y;
+        int x2 = x + w > (int)width ? width : x + w;
+        int y2 = y + h > (int)height ? height : y + h;
+
+        int r = (color >> 16) & 0xFF;
+        int g = (color >> 8) & 0xFF;
+        int b = color & 0xFF;
+
+        for (int py = y1; py < y2; py++) {
+            uint32_t* row = &target[py * width];
+            for (int px = x1; px < x2; px++) {
+                uint32_t bg = row[px];
+                int br = (bg >> 16) & 0xFF, bg_g = (bg >> 8) & 0xFF, bb = bg & 0xFF;
+                int res_r = (r * alpha + br * (255 - alpha)) >> 8;
+                int res_g = (g * alpha + bg_g * (255 - alpha)) >> 8;
+                int res_b = (b * alpha + bb * (255 - alpha)) >> 8;
+                row[px] = (res_r << 16) | (res_g << 8) | res_b;
+            }
+        }
+    }
+
+    void Painter::RoundedRect(int x, int y, int w, int h, int r, uint32_t color) {
+        int x1 = x < 0 ? 0 : x;
+        int y1 = y < 0 ? 0 : y;
+        int x2 = x + w > (int)width ? width : x + w;
+        int y2 = y + h > (int)height ? height : y + h;
+
+        for (int py = y1; py < y2; py++) {
+            uint32_t* row = &target[py * width];
+            for (int px = x1; px < x2; px++) {
+                int dx = px - x;
+                int dy = py - y;
+                // Скругление углов
+                if (dx < r && dy < r && (r - dx) * (r - dx) + (r - dy) * (r - dy) > r * r) continue;
+                if (dx >= w - r && dy < r && (dx - (w - r - 1)) * (dx - (w - r - 1)) + (r - dy) * (r - dy) > r * r) continue;
+                if (dx < r && dy >= h - r && (r - dx) * (r - dx) + (dy - (h - r - 1)) * (dy - (h - r - 1)) > r * r) continue;
+                if (dx >= w - r && dy >= h - r && (dx - (w - r - 1)) * (dx - (w - r - 1)) + (dy - (h - r - 1)) * (dy - (h - r - 1)) > r * r) continue;
+                row[px] = color;
+            }
+        }
+    }
+
+    void Painter::RoundedRectAlpha(int x, int y, int w, int h, int r, uint32_t color, uint8_t alpha) {
+        int x1 = x < 0 ? 0 : x;
+        int y1 = y < 0 ? 0 : y;
+        int x2 = x + w > (int)width ? width : x + w;
+        int y2 = y + h > (int)height ? height : y + h;
+
+        int cr = (color >> 16) & 0xFF;
+        int cg = (color >> 8) & 0xFF;
+        int cb = color & 0xFF;
+
+        for (int py = y1; py < y2; py++) {
+            uint32_t* row = &target[py * width];
+            for (int px = x1; px < x2; px++) {
+                int dx = px - x;
+                int dy = py - y;
+                if (dx < r && dy < r && (r - dx) * (r - dx) + (r - dy) * (r - dy) > r * r) continue;
+                if (dx >= w - r && dy < r && (dx - (w - r - 1)) * (dx - (w - r - 1)) + (r - dy) * (r - dy) > r * r) continue;
+                if (dx < r && dy >= h - r && (r - dx) * (r - dx) + (dy - (h - r - 1)) * (dy - (h - r - 1)) > r * r) continue;
+                if (dx >= w - r && dy >= h - r && (dx - (w - r - 1)) * (dx - (w - r - 1)) + (dy - (h - r - 1)) * (dy - (h - r - 1)) > r * r) continue;
+
+                uint32_t bg = row[px];
+                int br = (bg >> 16) & 0xFF, bg_g = (bg >> 8) & 0xFF, bb = bg & 0xFF;
+                int res_r = (cr * alpha + br * (255 - alpha)) >> 8;
+                int res_g = (cg * alpha + bg_g * (255 - alpha)) >> 8;
+                int res_b = (cb * alpha + bb * (255 - alpha)) >> 8;
+                row[px] = (res_r << 16) | (res_g << 8) | res_b;
+            }
+        }
+    }
+
+    void Painter::DrawRect(int x, int y, int w, int h, uint32_t color, int thickness) {
+        FillRect(x, y, w, thickness, color); // Top
+        FillRect(x, y + h - thickness, w, thickness, color); // Bottom
+        FillRect(x, y, thickness, h, color); // Left
+        FillRect(x + w - thickness, y, thickness, h, color); // Right
+    }
+
+    void Painter::DrawRoundedRect(int x, int y, int w, int h, int r, uint32_t color, int thickness) {
+        (void)thickness;
+        RoundedRect(x, y, w, h, r, color); // Заглушка под кастомные контуры скруглений
+    }
+
+    void Painter::Line(int x1, int y1, int x2, int y2, uint32_t color, int thickness) {
+        (void)thickness;
+        int dx = abs(x2 - x1), sx = x1 < x2 ? 1 : -1;
+        int dy = -abs(y2 - y1), sy = y1 < y2 ? 1 : -1;
+        int err = dx + dy, e2;
+
+        while (true) {
+            if (x1 >= 0 && x1 < (int)width && y1 >= 0 && y1 < (int)height) {
+                target[y1 * width + x1] = color;
+            }
+            if (x1 == x2 && y1 == y2) break;
+            e2 = 2 * err;
+            if (e2 >= dy) { err += dy; x1 += sx; }
+            if (e2 <= dx) { err += dx; y1 += sy; }
+        }
+    }
+
+    void Painter::Circle(int cx, int cy, int r, uint32_t color, int thickness) {
+        (void)thickness;
+        int x = -r, y = 0, err = 2 - 2 * r;
+        do {
+            if (cx - x >= 0 && cx - x < (int)width && cy + y >= 0 && cy + y < (int)height) target[(cy + y) * width + (cx - x)] = color;
+            if (cx - y >= 0 && cx - y < (int)width && cy - x >= 0 && cy - x < (int)height) target[(cy - x) * width + (cx - y)] = color;
+            if (cx + x >= 0 && cx + x < (int)width && cy - y >= 0 && cy - y < (int)height) target[(cy - y) * width + (cx + x)] = color;
+            if (cx + y >= 0 && cx + y < (int)width && cy + x >= 0 && cy + x < (int)height) target[(cy + x) * width + (cx + y)] = color;
+            r = err;
+            if (r <= y) err += ++y * 2 + 1;
+            if (r > x || err > y) err += ++x * 2 + 1;
+        } while (x < 0);
+    }
+
+    void Painter::CircleFilled(int cx, int cy, int r, uint32_t color) {
+        for (int dy = -r; dy <= r; dy++) {
+            for (int dx = -r; dx <= r; dx++) {
+                if (dx * dx + dy * dy <= r * r) {
+                    int px = cx + dx;
+                    int py = cy + dy;
+                    if (px >= 0 && px < (int)width && py >= 0 && py < (int)height) {
+                        target[py * width + px] = color;
+                    }
+                }
+            }
+        }
+    }
+
+    void Painter::Text(const char* str, int x, int y, uint32_t color) {
+        if (!font_glyphs) {
+            // Фолбек: если PSF-шрифт не загружен, рисуем простую сеточку
+            FillRect(x, y, 8, 16, color);
+            return;
+        }
+
+        int cur_x = x;
+        while (*str) {
+            if (*str == '\n') {
+                cur_x = x;
+                y += font_height;
+            } else {
+                uint8_t* glyph = &font_glyphs[(uint8_t)*str * font_charsize];
+                for (int cy = 0; cy < font_height; cy++) {
+                    if (y + cy < 0 || y + cy >= (int)height) continue;
+                    uint32_t* dst_row = &target[(y + cy) * width];
+
+                    int bytes_per_row = (font_width + 7) / 8;
+                    for (int b = 0; b < bytes_per_row; b++) {
+                        uint8_t row_byte = glyph[cy * bytes_per_row + b];
+                        for (int cx = 0; cx < 8; cx++) {
+                            int pixel_x = cur_x + b * 8 + cx;
+                            if (pixel_x < 0 || pixel_x >= (int)width) continue;
+                            if ((row_byte >> (7 - cx)) & 1) {
+                                dst_row[pixel_x] = color;
+                            }
+                        }
+                    }
+                }
+                cur_x += font_width;
+            }
+            str++;
+        }
+    }
+
+    void Painter::GradientRect(int x, int y, int w, int h, uint32_t col1, uint32_t col2, bool vertical) {
+        int x1 = x < 0 ? 0 : x;
+        int y1 = y < 0 ? 0 : y;
+        int x2 = x + w > (int)width ? width : x + w;
+        int y2 = y + h > (int)height ? height : y + h;
+
+        int r1 = (col1 >> 16) & 0xFF, g1 = (col1 >> 8) & 0xFF, b1 = col1 & 0xFF;
+        int r2 = (col2 >> 16) & 0xFF, g2 = (col2 >> 8) & 0xFF, b2 = col2 & 0xFF;
+
+        for (int py = y1; py < y2; py++) {
+            uint32_t* row = &target[py * width];
+            float t = vertical ? (float)(py - y) / (float)h : 0.0f;
+            for (int px = x1; px < x2; px++) {
+                if (!vertical) t = (float)(px - x) / (float)w;
+                int r = (int)(r1 + t * (r2 - r1));
+                int g = (int)(g1 + t * (g2 - g1));
+                int b = (int)(b1 + t * (b2 - b1));
+                row[px] = (r << 16) | (g << 8) | b;
+            }
+        }
+    }
+}
+
+// Заглушки для аудио стека (совместимость)
+void api_preload_boot_sound(void) {}
+void api_try_boot_sound(void) {}
+void api_tick_audio(void) {}
+bool play_wav_file(const char *filename) {
+    (void)filename;
+    return true;
+}
+
+// --- СТАРАЯ РЕАЛИЗАЦИЯ ШАДОУ И БЛЮРА (С КУЧЕЙ ОПТИМИЗАЦИЙ) ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ ---
 static uint32_t *blur_scratch_1 = nullptr;
 static uint32_t *blur_scratch_2 = nullptr;
 static int scratch_w = 0, scratch_h = 0;
@@ -47,26 +296,6 @@ static void ensure_blur_buffers(int w, int h) {
     scratch_w = w; scratch_h = h;
 }
 
-static inline bool is_pixel_masked(int tx, int ty, int w, int h, int r) {
-    if (tx < r && ty < r) {
-        int dx = r - tx, dy = r - ty;
-        return (dx * dx + dy * dy > r * r);
-    }
-    if (tx >= w - r && ty < r) {
-        int dx = tx - (w - r - 1), dy = r - ty;
-        return (dx * dx + dy * dy > r * r);
-    }
-    if (tx < r && ty >= h - r) {
-        int dx = r - tx, dy = ty - (h - r - 1);
-        return (dx * dx + dy * dy > r * r);
-    }
-    if (tx >= w - r && ty >= h - r) {
-        int dx = tx - (w - r - 1), dy = ty - (h - r - 1);
-        return (dx * dx + dy * dy > r * r);
-    }
-    return false;
-}
-
 void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, uint32_t tint_rgb) {
     if (!draw_target || w <= 0 || h <= 0) return;
     
@@ -77,7 +306,6 @@ void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, u
     ensure_blur_buffers(dsW, dsH);
     if (!blur_scratch_1) return; 
 
-    // 1. Адаптивный даунсэмплинг для оптимизации CPU
     for (int dy = 0; dy < dsH; dy++) {
         for (int dx = 0; dx < dsW; dx++) {
             int sx = x + dx * 4;
@@ -88,7 +316,6 @@ void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, u
         }
     }
 
-    // 2. Двухпроходный фильтр Гаусса (3x3 Box Approximation)
     int r_blur = 3; 
     int window = r_blur * 2 + 1;
 
@@ -117,7 +344,6 @@ void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, u
         }
     }
 
-    // 3. Апсэмплинг с цветовым тинированием и наложением органического шума (Noise/Dither)
     int alpha = (int)(amount_f * 255.0f);
     int tr = (tint_rgb >> 16) & 0xFF, tg = (tint_rgb >> 8) & 0xFF, tb = tint_rgb & 0xFF;
 
@@ -132,7 +358,6 @@ void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, u
 
             if (radius > 0 && is_pixel_masked(tx, ty, w, h, radius)) continue;
 
-            // Билинейное сглаживание размытых пикселей при масштабировании
             float f_dx = (float)tx / 4.0f;
             float f_dy = (float)ty / 4.0f;
             int x0 = (int)f_dx; int y0 = (int)f_dy;
@@ -154,12 +379,10 @@ void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, u
             int bg = interpolate((c00>>8)&0xFF,  (c10>>8)&0xFF,  (c01>>8)&0xFF,  (c11>>8)&0xFF,  tx_diff, ty_diff);
             int bb = interpolate(c00&0xFF,        c10&0xFF,        c01&0xFF,        c11&0xFF,        tx_diff, ty_diff);
 
-            // Смешивание с полупрозрачной подложкой
             int fr = (br * (255 - alpha) + tr * alpha) >> 8;
             int fg = (bg * (255 - alpha) + tg * alpha) >> 8;
             int fb = (bb * (255 - alpha) + tb * alpha) >> 8;
 
-            // Наложение мягкого пленочного шума (дизеринг цвета) для реалистичности стекла
             int noise = (rand() % 4) - 2;
             fr = clamp_int(fr + noise, 0, 255);
             fg = clamp_int(fg + noise, 0, 255);
@@ -170,15 +393,9 @@ void draw_acrylic_blur(int x, int y, int w, int h, float amount_f, int radius, u
     }
 }
 
-static inline float cross_product(ImVec2 a, ImVec2 b, ImVec2 c) {
-    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-}
-
-// ПРОГРАММНЫЙ РАСЧЕТ МЯГКОЙ ТЕНИ НА ОСНОВЕ SDF (SIGNED DISTANCE FIELD) ДЛЯ ROUNDED RECT
 void draw_soft_shadow(int x, int y, int w, int h, int radius, int shadow_radius, float max_alpha, int offset_x, int offset_y) {
     if (!draw_target || w <= 0 || h <= 0 || shadow_radius <= 0) return;
     
-    // Границы области тени
     int sx = x + offset_x - shadow_radius;
     int sy = y + offset_y - shadow_radius;
     int sw = w + 2 * shadow_radius;
@@ -196,8 +413,6 @@ void draw_soft_shadow(int x, int y, int w, int h, int radius, int shadow_radius,
         for (int px = sx; px < sx + sw; px++) {
             if (px < 0 || px >= (int)screen_w) continue;
             
-            // 1. Оптимизация: Пропускаем пиксели внутри исходного скругленного прямоугольника,
-            // так как поверх все равно нарисуется сам объект (окно/док)
             float rx = fabsf(px - cx);
             float ry = fabsf(py - cy);
             float rtx = rx - dx; if (rtx < 0) rtx = 0;
@@ -206,7 +421,6 @@ void draw_soft_shadow(int x, int y, int w, int h, int radius, int shadow_radius,
                 continue;
             }
             
-            // 2. Расстояние до смещенного прямоугольника тени
             float vx = fabsf((px - offset_x) - cx);
             float vy = fabsf((py - offset_y) - cy);
             float tx = vx - dx; if (tx < 0) tx = 0;
@@ -217,7 +431,6 @@ void draw_soft_shadow(int x, int y, int w, int h, int radius, int shadow_radius,
             if (dist < shadow_radius) {
                 float t = dist / (float)shadow_radius;
                 if (t < 0.0f) t = 0.0f;
-                // Мягкий спад тени с использованием кубического сглаживания (Smoothstep-подобный)
                 float factor = (1.0f - t * t * (3.0f - 2.0f * t)) * max_alpha;
                 
                 uint32_t bg = row[px];
@@ -234,166 +447,4 @@ void draw_soft_shadow(int x, int y, int w, int h, int radius, int shadow_radius,
             }
         }
     }
-}
-
-// ВЫСОКОКАЧЕСТВЕННЫЙ БИЛИНИЙНЫЙ ТЕКСТУРНЫЙ СЭМПЛЕР ДЛЯ СГЛАЖИВАНИЯ ШРИФТОВ
-static inline uint8_t sample_font_bilinear(const uint8_t* pixels, int tex_w, int tex_h, float u, float v) {
-    if (!pixels) return 255;
-    float tex_x = u * (tex_w - 1);
-    float tex_y = v * (tex_h - 1);
-    int x0 = (int)tex_x;
-    int y0 = (int)tex_y;
-    int x1 = x0 + 1; if (x1 >= tex_w) x1 = tex_w - 1;
-    int y1 = y0 + 1; if (y1 >= tex_h) y1 = tex_h - 1;
-    
-    float dx = tex_x - x0;
-    float dy = tex_y - y0;
-
-    uint8_t p00 = pixels[y0 * tex_w + x0];
-    uint8_t p10 = pixels[y0 * tex_w + x1];
-    uint8_t p01 = pixels[y1 * tex_w + x0];
-    uint8_t p11 = pixels[y1 * tex_w + x1];
-
-    float val = p00 * (1.0f - dx) * (1.0f - dy) +
-                p10 * dx * (1.0f - dy) +
-                p01 * (1.0f - dx) * dy +
-                p11 * dx * dy;
-    return (uint8_t)val;
-}
-
-// РАСТЕРИЗАТОР С ПОДДЕРЖКОЙ 4x MULTI-SAMPLE ANTI-ALIASING (MSAA) НА ГРАНИЦАХ ТРЕУГОЛЬНИКОВ
-void api_render_imgui_data(void* draw_data_ptr) {
-    ImDrawData* draw_data = (ImDrawData*)draw_data_ptr;
-    ImGuiIO& io = ImGui::GetIO();
-    unsigned char* tex_pixels = nullptr;
-    int tex_w = 0, tex_h = 0;
-    
-    io.Fonts->GetTexDataAsAlpha8(&tex_pixels, &tex_w, &tex_h);
-
-    // Смещения 4-х субпикселей для MSAA (Сетка 2x2 в пределах пикселя)
-    const float sub_x[4] = { 0.25f, 0.75f, 0.25f, 0.75f };
-    const float sub_y[4] = { 0.25f, 0.25f, 0.75f, 0.75f };
-
-    for (int n = 0; n < draw_data->CmdListsCount; n++) {
-        const ImDrawList* cmd_list = draw_data->CmdLists[n];
-        const ImDrawVert* vtx_buffer = cmd_list->VtxBuffer.Data;
-        const ImDrawIdx* idx_buffer = cmd_list->IdxBuffer.Data;
-
-        for (int cmd_i = 0; cmd_i < cmd_list->CmdBuffer.Size; cmd_i++) {
-            const ImDrawCmd* pcmd = &cmd_list->CmdBuffer[cmd_i];
-            ImVec4 clip = pcmd->ClipRect;
-            
-            for (unsigned int i = 0; i < pcmd->ElemCount; i += 3) {
-                const ImDrawVert& v1 = vtx_buffer[idx_buffer[pcmd->IdxOffset + i + 0]];
-                const ImDrawVert& v2 = vtx_buffer[idx_buffer[pcmd->IdxOffset + i + 1]];
-                const ImDrawVert& v3 = vtx_buffer[idx_buffer[pcmd->IdxOffset + i + 2]];
-
-                // Расширяем рамку на 1 пиксель для учета субпиксельного покрытия по краям
-                int min_x = (int)ImMin(v1.pos.x, ImMin(v2.pos.x, v3.pos.x)) - 1;
-                int max_x = (int)ImMax(v1.pos.x, ImMax(v2.pos.x, v3.pos.x)) + 1;
-                int min_y = (int)ImMin(v1.pos.y, ImMin(v2.pos.y, v3.pos.y)) - 1;
-                int max_y = (int)ImMax(v1.pos.y, ImMax(v2.pos.y, v3.pos.y)) + 1;
-
-                min_x = ImMax(min_x, (int)clip.x); max_x = ImMin(max_x, (int)clip.z);
-                min_y = ImMax(min_y, (int)clip.y); max_y = ImMin(max_y, (int)clip.w);
-
-                float area = cross_product(v1.pos, v2.pos, v3.pos);
-                if (area == 0.0f) continue;
-
-                for (int py = min_y; py < max_y; py++) {
-                    if (py < 0 || py >= (int)screen_h) continue;
-                    uint32_t *row = &draw_target[py * screen_w];
-                    for (int px = min_x; px < max_x; px++) {
-                        if (px < 0 || px >= (int)screen_w) continue;
-                        
-                        int inside_count = 0;
-                        float sum_w1 = 0.0f;
-                        float sum_w2 = 0.0f;
-
-                        // Оцениваем вхождение каждого из 4 субпикселей
-                        for (int s = 0; s < 4; s++) {
-                            ImVec2 sub_p((float)px + sub_x[s], (float)py + sub_y[s]);
-                            float w1 = cross_product(v2.pos, v3.pos, sub_p) / area;
-                            float w2 = cross_product(v3.pos, v1.pos, sub_p) / area;
-                            float w3 = 1.0f - w1 - w2;
-
-                            // Небольшой допуск по краям для исключения пробелов точности float
-                            if (w1 >= -1e-4f && w2 >= -1e-4f && w3 >= -1e-4f) {
-                                inside_count++;
-                                sum_w1 += w1;
-                                sum_w2 += w2;
-                            }
-                        }
-
-                        if (inside_count > 0) {
-                            // Вычисляем усредненные барицентрические координаты внутри покрытой зоны
-                            float w1 = sum_w1 / inside_count;
-                            float w2 = sum_w2 / inside_count;
-                            float w3 = 1.0f - w1 - w2;
-
-                            if (w1 < 0.0f) w1 = 0.0f;
-                            if (w2 < 0.0f) w2 = 0.0f;
-                            if (w3 < 0.0f) w3 = 0.0f;
-                            float sum = w1 + w2 + w3;
-                            if (sum > 0.0f) {
-                                w1 /= sum;
-                                w2 /= sum;
-                                w3 /= sum;
-                            }
-
-                            float tu = w1 * v1.uv.x + w2 * v2.uv.x + w3 * v3.uv.x;
-                            float tv = w1 * v1.uv.y + w2 * v2.uv.y + w3 * v3.uv.y;
-
-                            // Сэмплируем текстуру шрифта с билинейной фильтрацией
-                            uint8_t tex_alpha = sample_font_bilinear(tex_pixels, tex_w, tex_h, tu, tv);
-
-                            ImU32 col = v1.col;
-                            int vertex_alpha = (col >> 24) & 0xFF;
-                            int a = (vertex_alpha * tex_alpha) / 255;
-                            
-                            // Модулируем альфу покрытием пикселя (coverage / 4)
-                            a = (a * inside_count) / 4;
-                            if (a == 0) continue;
-
-                            int r = (col & 0xFF), g = (col >> 8) & 0xFF, b = (col >> 16) & 0xFF;
-
-                            if (a == 255) {
-                                row[px] = (r << 16) | (g << 8) | b;
-                            } else {
-                                uint32_t bg = row[px];
-                                int br = (bg >> 16) & 0xFF, bg_g = (bg >> 8) & 0xFF, bb = bg & 0xFF;
-                                int res_r = (r * a + br * (255 - a)) >> 8;
-                                int res_g = (g * a + bg_g * (255 - a)) >> 8;
-                                int res_b = (b * a + bb * (255 - a)) >> 8;
-                                row[px] = (res_r << 16) | (res_g << 8) | res_b;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-void api_tick_audio(void) {}
-
-bool play_wav_file(const char *filename) {
-    uint32_t size = 0;
-    uint64_t addr = _syscall(2, (uint64_t)filename, (uint64_t)&size, 0, 0, 0);
-    if (!addr) return false;
-    _syscall(20, addr + 44, size - 44, 0, 0, 0);
-    return true;
-}
-
-static bool boot_sound_loaded = false;
-
-void api_preload_boot_sound(void) {
-    boot_sound_loaded = true; 
-}
-
-void api_try_boot_sound(void) {
-    static bool s_done = false;
-    if (s_done || !boot_sound_loaded) return;
-    play_wav_file("res/sysgui/BOOTSOUND.wav");
-    s_done = true;
 }

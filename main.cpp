@@ -11,8 +11,6 @@ extern "C" {
 #include <stdio.h>
 }
 
-#include "imgui/imgui.h"
-
 uint32_t *vram = nullptr;
 uint32_t *backbuffer = nullptr;
 uint32_t *draw_target = nullptr;
@@ -32,9 +30,19 @@ void sysgui_init_dirty_grid() {
 void sysgui_mark_dirty(int x, int y, int w, int h) {
     if (!dirty_grid) return;
     int x2 = x + w, y2 = y + h;
-    for (int r = y / TILE_SIZE; r <= y2 / TILE_SIZE && r < grid_rows; r++) {
-        for (int c = x / TILE_SIZE; c <= x2 / TILE_SIZE && c < grid_cols; c++) {
-            if (r >= 0 && c >= 0) dirty_grid[r * grid_cols + c] = 1;
+    int start_r = y / TILE_SIZE;
+    int end_r = y2 / TILE_SIZE;
+    int start_c = x / TILE_SIZE;
+    int end_c = x2 / TILE_SIZE;
+
+    if (start_r < 0) start_r = 0;
+    if (start_c < 0) start_c = 0;
+    if (end_r >= grid_rows) end_r = grid_rows - 1;
+    if (end_c >= grid_cols) end_c = grid_cols - 1;
+
+    for (int r = start_r; r <= end_r; r++) {
+        for (int c = start_c; c <= end_c; c++) {
+            dirty_grid[r * grid_cols + c] = 1;
         }
     }
 }
@@ -53,12 +61,10 @@ void copy_dirty_to_vram() {
 
         int c = 0;
         while (c < grid_cols) {
-            // Ищем начало грязного отрезка тайлов
             if (dirty_grid[r * grid_cols + c]) {
                 int c_start = c;
-                // Склеиваем идущие подряд грязные тайлы в одну строчку
                 while (c < grid_cols && dirty_grid[r * grid_cols + c]) {
-                    dirty_grid[r * grid_cols + c] = 0; // Сбрасываем грязь
+                    dirty_grid[r * grid_cols + c] = 0;
                     c++;
                 }
                 int c_end = c;
@@ -68,7 +74,6 @@ void copy_dirty_to_vram() {
                 if (x_end > (int)screen_w) x_end = screen_w;
                 int copy_w = x_end - x_start;
 
-                // Копируем склеенный блок строк для текущего ряда тайлов
                 for (int i = 0; i < tile_h; i++) {
                     int current_y = y_start + i;
                     uint32_t *dst = &vram[current_y * screen_w + x_start];
@@ -99,7 +104,20 @@ static inline void get_mouse_state(int* mx, int* my, bool* mdown) {
     *mdown = (r_btn & 1);
 }
 
-// 19x27 macOS Sonoma-style cursor with custom anti-aliased edge blending and its own soft shadow
+static inline uint16_t get_key_state() {
+    // Системный вызов получения сканкода/клавиши
+    uint64_t key = 0;
+    __asm__ volatile(
+        "mov $5, %%rax\n\t"
+        "int $0x80\n\t"
+        "mov %%rax, %0\n\t"
+        : "=r"(key)
+        :
+        : "rax", "memory"
+    );
+    return (uint16_t)key;
+}
+
 static const int CURSOR_W = 19;
 static const int CURSOR_H = 27;
 
@@ -135,15 +153,18 @@ static const char* s_CursorSprite[27] = {
 
 static inline uint32_t get_cursor_pixel(char c) {
     switch (c) {
-        case 'B': return 0xFF000000; // Черная кайма
-        case 'd': return 0x99000000; // Полупрозрачная черная кайма (сглаживание)
-        case 'W': return 0xFFFFFFFF; // Белое тело
-        case 's': return 0x2A000000; // Мягкая тень курсора
-        case '.': default: return 0x00000000; // Прозрачный
+        case 'B': return 0xFF000000;
+        case 'd': return 0x99000000;
+        case 'W': return 0xFFFFFFFF;
+        case 's': return 0x2A000000;
+        case '.': default: return 0x00000000;
     }
 }
 
+extern bool load_psf_font(const char* path);
+
 int main(int argc, char **argv) {
+    (void)argc; (void)argv;
     uint64_t phys_fb = 0;
     uint32_t w = 0, h = 0, pitch = 0;
 
@@ -153,61 +174,13 @@ int main(int argc, char **argv) {
     screen_h = h;
 
     char msg[128];
-    sprintf(msg, "GUI: Sonoma Interface active %ux%u.\n", screen_w, screen_h);
+    sprintf(msg, "GUI: Sonoma Interface active %ux%u (NATIVE MODE).\n", screen_w, screen_h);
     _syscall(1, (uint64_t)msg, 0, 0, 0, 0);
 
-    IMGUI_CHECKVERSION();
-    if (!ImGui::CreateContext()) {
-        sys_exit(1);
+    // Загружаем системный PSF шрифт
+    if (!load_psf_font("res/sysgui/Inter.ttf")) { // Если Inter.ttf у вас скомпилирован как PSF
+        load_psf_font("res/font.psf"); // Фолбек на консольный шрифт
     }
-    
-    ImGuiIO& io = ImGui::GetIO();
-    io.IniFilename = nullptr; 
-    io.BackendFlags |= ImGuiBackendFlags_RendererHasTextures;
-    io.DisplaySize = ImVec2((float)screen_w, (float)screen_h);
-
-    // Увеличили размер шрифта до 18px для идеальной читаемости и четкости
-    ImFont* font = io.Fonts->AddFontFromFileTTF("res/sysgui/Inter.ttf", 18.0f, NULL, io.Fonts->GetGlyphRangesCyrillic());
-    if (!font) {
-        _syscall(1, (uint64_t)"WARNING: Could not load Inter.ttf, fallback\n", 0, 0, 0, 0);
-    }
-
-    // --- НАСТРОЙКА СТИЛЯ FUTURISTIC CYBER EQUINOXOS ---
-    ImGuiStyle& style = ImGui::GetStyle();
-    style.WindowRounding = WINDOW_ROUNDING_LARGE; // Используем обновленный WINDOW_ROUNDING_LARGE (4.0f)
-    style.FrameRounding = 2.0f;
-    style.GrabRounding = 2.0f;
-    style.ScrollbarRounding = 4.0f;
-    style.ScrollbarSize = 10.0f;
-    style.WindowBorderSize = 1.0f;
-    style.FrameBorderSize = 1.0f;
-    style.PopupRounding = 2.0f;
-
-    // Цвета космической бездны и неонового кибера
-    style.Colors[ImGuiCol_WindowBg]             = ImVec4(0.03f, 0.02f, 0.06f, 0.0f); // Прозрачный под блюр
-    style.Colors[ImGuiCol_Border]               = ImVec4(0.00f, 0.90f, 1.00f, 0.25f); // Тонкий неоновый циан
-    style.Colors[ImGuiCol_BorderShadow]         = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    style.Colors[ImGuiCol_Text]                 = ImVec4(0.92f, 0.96f, 1.00f, 1.00f); // Кибер-белый с голубым отливом
-    style.Colors[ImGuiCol_TextDisabled]         = ImVec4(0.40f, 0.45f, 0.55f, 1.00f);
-    style.Colors[ImGuiCol_Header]               = ImVec4(0.45f, 0.00f, 0.85f, 0.45f); // Насыщенный фиолетовый
-    style.Colors[ImGuiCol_HeaderActive]         = ImVec4(0.45f, 0.00f, 0.85f, 0.80f);
-    style.Colors[ImGuiCol_HeaderHovered]        = ImVec4(0.45f, 0.00f, 0.85f, 0.65f);
-    style.Colors[ImGuiCol_Button]               = ImVec4(0.08f, 0.12f, 0.24f, 0.80f); // Темно-синие кнопки
-    style.Colors[ImGuiCol_ButtonHovered]        = ImVec4(0.00f, 0.90f, 1.00f, 0.60f); // Неоново-голубой при ховере
-    style.Colors[ImGuiCol_ButtonActive]         = ImVec4(0.00f, 0.70f, 0.80f, 1.00f);
-    style.Colors[ImGuiCol_FrameBg]              = ImVec4(0.06f, 0.07f, 0.15f, 0.80f);
-    style.Colors[ImGuiCol_FrameBgHovered]       = ImVec4(0.00f, 0.90f, 1.00f, 0.20f);
-    style.Colors[ImGuiCol_FrameBgActive]        = ImVec4(0.00f, 0.90f, 1.00f, 0.35f);
-    style.Colors[ImGuiCol_ScrollbarBg]          = ImVec4(0.02f, 0.02f, 0.05f, 0.40f);
-    style.Colors[ImGuiCol_ScrollbarGrab]        = ImVec4(0.45f, 0.00f, 0.85f, 0.40f);
-    style.Colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.45f, 0.00f, 0.85f, 0.60f);
-    style.Colors[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.00f, 0.90f, 1.00f, 0.80f);
-    style.Colors[ImGuiCol_TitleBg]              = ImVec4(0.05f, 0.04f, 0.10f, 0.90f);
-    style.Colors[ImGuiCol_TitleBgActive]        = ImVec4(0.12f, 0.05f, 0.25f, 0.95f);
-    style.Colors[ImGuiCol_TitleBgCollapsed]     = ImVec4(0.05f, 0.04f, 0.10f, 0.70f);
-    style.Colors[ImGuiCol_CheckMark]            = ImVec4(0.00f, 0.90f, 1.00f, 1.00f);
-    style.Colors[ImGuiCol_SliderGrab]           = ImVec4(0.00f, 0.90f, 1.00f, 1.00f);
-    style.Colors[ImGuiCol_SliderGrabActive]     = ImVec4(0.00f, 0.70f, 0.80f, 1.00f);
 
     vram = (uint32_t *)_syscall(30, phys_fb, screen_w * screen_h * 4, 0, 0, 0);
     if (!vram) {
@@ -228,42 +201,36 @@ int main(int argc, char **argv) {
     int mx = 0, my = 0;
     bool mdown = false;
 
+    GUI::Painter painter(backbuffer, screen_w, screen_h);
+
     while (true) {
         uint32_t now = (uint32_t)_syscall(6, 0, 0, 0, 0, 0);
         float dt = (now - last_time) / 1000.0f;
         last_time = now;
 
-        // Ввод: Мышь
+        // Опрос мыши и клавиатуры
         get_mouse_state(&mx, &my, &mdown);
+        uint16_t key = get_key_state();
 
+        // Помечаем старую область курсора и новую грязной
         static int last_mx = 0, last_my = 0;
         sysgui_mark_dirty(last_mx, last_my, CURSOR_W, CURSOR_H);
         sysgui_mark_dirty(mx, my, CURSOR_W, CURSOR_H);
         last_mx = mx;
         last_my = my;
 
-        io.MousePos = ImVec2((float)mx, (float)my);
-
-        // 1. Инициализируем новый кадр Dear ImGui в самом начале цикла.
-        // Это критически важно, так как фоновые виджеты рабочего стола используют контекст ImGui.
-        ImGui::NewFrame();
-
-        // 2. Отрисовка подложки рабочего стола и виджетов (теперь вызовы ImGui безопасны)
-        GUI::RenderDesktop();
+        // 1. Отрисовка рабочего стола (обои + Dashboard виджеты)
+        GUI::RenderDesktop(painter);
         
-        // 3. Обновление состояния и рендеринг системных элементов интерфейса
-        GUI::UpdateDesktop(dt, mx, my, mdown, 0);
-        GUI::RenderTopPanel();
-        GUI::RenderDock(mx, my, mdown);
-        GUI::RenderWindows(dt);
+        // 2. Обновление поведения окружения
+        GUI::UpdateDesktop(dt, mx, my, mdown, key);
 
-        // 4. Финализация кадра ImGui
-        ImGui::Render();
+        // 3. Рендеринг панелей, дока и менеджера нативных окон
+        GUI::RenderTopPanel(painter);
+        GUI::RenderDock(painter, mx, my, mdown);
+        GUI::RenderWindows(painter, dt, mx, my, mdown, key);
 
-        // 5. Программный растеризатор ImGui поверх всего кадра
-        api_render_imgui_data(ImGui::GetDrawData());
-
-        // 6. Отрисовка софтварного сглаженного курсора
+        // 4. Отрисовка софтварного сглаженного курсора поверх бэкбуфера
         for (int i = 0; i < CURSOR_H; i++) {
             for (int j = 0; j < CURSOR_W; j++) {
                 char c = s_CursorSprite[i][j];
@@ -277,9 +244,7 @@ int main(int argc, char **argv) {
                         backbuffer[py * screen_w + px] = col & 0xFFFFFF;
                     } else {
                         uint32_t bg = backbuffer[py * screen_w + px];
-                        int r = (col >> 16) & 0xFF;
-                        int g = (col >> 8) & 0xFF;
-                        int b = col & 0xFF;
+                        int r = (col >> 16) & 0xFF, g = (col >> 8) & 0xFF, b = col & 0xFF;
                         int br = (bg >> 16) & 0xFF, bg_g = (bg >> 8) & 0xFF, bb = bg & 0xFF;
                         int res_r = (r * a + br * (255 - a)) >> 8;
                         int res_g = (g * a + bg_g * (255 - a)) >> 8;
@@ -290,10 +255,8 @@ int main(int argc, char **argv) {
             }
         }
 
-        // 7. Копирование измененных тайлов на экран
+        // 5. Копирование измененных тайлов во VRAM
         copy_dirty_to_vram();
-        
-        api_tick_audio();
         
         // Ограничение FPS (~60)
         _syscall(13, 16, 0, 0, 0, 0); 
