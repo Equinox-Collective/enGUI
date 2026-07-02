@@ -6,17 +6,25 @@ SDK_DIR = ../../sdk
 SDK_OBJS = $(wildcard $(SDK_DIR)/lib/*.o)
 LIBC = ../../third_party/musl/lib/libc.a
 
-# Обязательные флаги компилятора (убран -I./imgui, так как imgui удален)
+LVGL_DIR = ../../third_party/lvgl
+LVGL_LIB = $(LVGL_DIR)/liblvgl.a
+
+# ---- sysgui compiler flags ----
+# -I$(LVGL_DIR) : чтобы инклюды "src/..." работали внутри LVGL
+# -I.           : чтобы lv_conf.h находился рядом с Makefile
+# -DLV_CONF_INCLUDE_SIMPLE : сообщает LVGL искать "lv_conf.h" напрямую
 CXXFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
            -fno-omit-frame-pointer -fno-exceptions -fno-rtti -fno-threadsafe-statics \
-           -I$(SDK_DIR)/include -O2 -std=c++17 -MMD -MP
+           -I$(SDK_DIR)/include -O2 -std=c++17 -MMD -MP \
+           -I$(LVGL_DIR) -I. -DLV_CONF_INCLUDE_SIMPLE
 
 CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
-         -fno-omit-frame-pointer -I$(SDK_DIR)/include -O2 -MMD -MP
+         -fno-omit-frame-pointer -I$(SDK_DIR)/include -O2 -MMD -MP \
+         -I$(LVGL_DIR) -I. -DLV_CONF_INCLUDE_SIMPLE
 
 LDFLAGS = -nostdlib -T app.ld
 
-# Исходники (imgui удален из списка)
+# ---- sysgui sources ----
 GUI_SRCS = $(wildcard gui/*.cpp) $(wildcard gui/apps/*.cpp)
 SRCS = main.cpp api_gui.cpp $(GUI_SRCS)
 
@@ -24,13 +32,14 @@ OBJS = $(SRCS:.cpp=.o)
 
 all: sysgui.elf
 
-# Линковка: теперь мы передаем Musl libc (LIBC) в конец команды
-sysgui.elf: $(OBJS) $(SDK_OBJS)
-	$(LD) $(LDFLAGS) $(SDK_OBJS) $(OBJS) $(LIBC) -o $@
+sysgui.elf: $(OBJS) $(SDK_OBJS) $(LVGL_LIB)
+	$(LD) $(LDFLAGS) $(SDK_OBJS) $(OBJS) $(LVGL_LIB) $(LIBC) -o $@
 
+# sysgui C++ сборка
 %.o: %.cpp
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 
+# sysgui C сборка (локальные файлы)
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
 
