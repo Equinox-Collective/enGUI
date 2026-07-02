@@ -3,7 +3,6 @@
 #include <equos.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 #include <stdlib.h>
 
 // Параметры экрана
@@ -112,6 +111,22 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     }
 }
 
+// --- Обработчик перетаскивания окна в LVGL v9 ---
+static void win_drag_event_cb(lv_event_t *e) {
+    lv_obj_t *header = (lv_obj_t *)lv_event_get_target_obj(e);
+    lv_obj_t *win = lv_obj_get_parent(header); // Перемещаем родительское окно, а не сам заголовок
+    if (!win) return;
+
+    lv_indev_t *indev = lv_indev_active();
+    if (!indev) return;
+
+    lv_point_t vect;
+    lv_indev_get_vect(indev, &vect);
+    int32_t x = lv_obj_get_x_aligned(win) + vect.x;
+    int32_t y = lv_obj_get_y_aligned(win) + vect.y;
+    lv_obj_set_pos(win, x, y);
+}
+
 // --- Помощник создания кастомных окон ---
 static lv_obj_t *create_custom_window(const char *title, int w, int h, lv_obj_t **out_win) {
     lv_obj_t *win = lv_obj_create(lv_screen_active());
@@ -121,7 +136,6 @@ static lv_obj_t *create_custom_window(const char *title, int w, int h, lv_obj_t 
     lv_obj_set_style_border_color(win, lv_color_hex(0x4A505C), LV_PART_MAIN);
     lv_obj_set_style_border_width(win, 2, LV_PART_MAIN);
     lv_obj_set_style_pad_all(win, 0, LV_PART_MAIN);
-    lv_obj_add_flag(win, LV_OBJ_FLAG_DRAGGABLE);
     lv_obj_center(win);
     lv_obj_add_flag(win, LV_OBJ_FLAG_HIDDEN); // Скрыто по умолчанию
 
@@ -133,6 +147,9 @@ static lv_obj_t *create_custom_window(const char *title, int w, int h, lv_obj_t 
     lv_obj_set_style_border_width(header, 0, LV_PART_MAIN);
     lv_obj_set_style_pad_all(header, 5, LV_PART_MAIN);
     lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
+    
+    // В LVGL 9 регистрируем перетаскивание через EVENT_PRESSING на заголовке
+    lv_obj_add_event_cb(header, win_drag_event_cb, LV_EVENT_PRESSING, nullptr);
 
     lv_obj_t *title_lbl = lv_label_create(header);
     lv_label_set_text(title_lbl, title);
@@ -164,7 +181,7 @@ static lv_obj_t *create_custom_window(const char *title, int w, int h, lv_obj_t 
 static lv_obj_t *term_history = nullptr;
 static void term_input_event_handler(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t *ta = (lv_obj_t *)lv_event_get_target(e);
+    lv_obj_t *ta = (lv_obj_t *)lv_event_get_target_obj(e);
     if (code == LV_EVENT_READY) {
         const char *cmd = lv_textarea_get_text(ta);
         if (strlen(cmd) == 0) return;
@@ -241,17 +258,23 @@ static void build_sysmon_window() {
 
 // --- Системный таймер обновлений (каждую секунду) ---
 static void update_system_stats_cb(lv_timer_t *timer) {
-    // 1. Обновление времени
+    // 1. Обновление времени из Unix timestamp
     uint64_t unix_secs = 0;
     _syscall(87, (uint64_t)&unix_secs, 0, 0, 0, 0); // SYS_GET_WALL_TIME
     char time_str[32];
+    
     if (unix_secs != 0) {
-        time_t t = (time_t)unix_secs;
-        struct tm *tm_info = localtime(&t);
-        if (tm_info) {
-            strftime(time_str, sizeof(time_str), "%H:%M:%S", tm_info);
-            lv_label_set_text(clock_label, time_str);
-        }
+        // Декодируем Unix-время без зависимости от libc-функций time/localtime/strftime
+        uint32_t seconds_in_day = unix_secs % 86400;
+        uint32_t hours = seconds_in_day / 3600;
+        uint32_t minutes = (seconds_in_day % 3600) / 60;
+        uint32_t seconds = seconds_in_day % 60;
+        
+        // Поправка на часовой пояс UTC+3 (МСК)
+        uint32_t local_hours = (hours + 3) % 24; 
+        
+        sprintf(time_str, "%02u:%02u:%02u", local_hours, minutes, seconds);
+        lv_label_set_text(clock_label, time_str);
     } else {
         uint32_t ticks = sysgui_get_time_ms();
         uint32_t secs = ticks / 1000;
@@ -436,10 +459,13 @@ static void build_desktop_ui() {
 
 // --- Главная точка входа ---
 int main(int argc, char **argv) {
-    // 1. Инициализация дисплея фреймбуфера
-    _syscall(SYS_GET_VESA_INFO, (uint64_t)&screen_w, (uint64_t)&screen_w, (uint64_t)&screen_h, (uint64_t)&screen_pitch, 0);
+    // 1. Получение информации о VESA LFB через SYS_GET_VESA_INFO
+    uint64_t phys_fb = 0;
+    _syscall(SYS_GET_VESA_INFO, (uint64_t)&phys_fb, (uint64_t)&screen_w, (uint64_t)&screen_h, (uint64_t)&screen_pitch, 0);
+    
+    // Маппинг видеопамяти ядра в адресное пространство Ring 3 приложения
     uint32_t fb_size = screen_h * screen_pitch;
-    fb_vram = (uint32_t *)_syscall(SYS_MAP_PHYS, screen_w, fb_size, 0, 0, 0); // Маппинг VRAM
+    fb_vram = (uint32_t *)_syscall(SYS_MAP_PHYS, phys_fb, fb_size, 0, 0, 0);
 
     // 2. Инициализация LVGL
     lv_init();
