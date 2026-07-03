@@ -132,8 +132,13 @@ static bool spawn_sh_in_terminal(void) {
             nullptr
         };
 
-        execve("bin/sh.elf", argv, environ);
-        execve("/bin/sh.elf", argv, environ);
+        // Гарантированно валидный пустой массив окружения
+        char *envp[] = {
+            nullptr
+        };
+
+        execve("bin/sh.elf", argv, envp);
+        execve("/bin/sh.elf", argv, envp);
         sys_exit(127);
     }
 
