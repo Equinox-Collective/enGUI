@@ -56,6 +56,27 @@ lv_obj_t *create_custom_window(const char *title, int w, int h, lv_obj_t **out_w
     lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 10, 0);
     lv_obj_set_style_text_color(title_lbl, lv_color_hex(0xE6E6E6), LV_PART_MAIN);
 
+    // Улучшение #2: кнопка «Minimize» (сворачивание окна)
+    lv_obj_t *minimize_btn = lv_button_create(header);
+    lv_obj_set_size(minimize_btn, 22, 22);
+    lv_obj_align(minimize_btn, LV_ALIGN_RIGHT_MID, -32, 0); // левее кнопки закрытия
+    lv_obj_set_style_bg_color(minimize_btn, lv_color_hex(0xF0C040), LV_PART_MAIN);
+    lv_obj_t *minimize_lbl = lv_label_create(minimize_btn);
+    lv_label_set_text(minimize_lbl, LV_SYMBOL_MINUS);
+    lv_obj_center(minimize_lbl);
+    lv_obj_set_style_text_color(minimize_lbl, lv_color_hex(0x1E2127), LV_PART_MAIN);
+    lv_obj_add_event_cb(minimize_btn, [](lv_event_t *e) {
+        lv_obj_t *w = (lv_obj_t *)lv_event_get_user_data(e);
+        // Уменьшаем окно до строки заголовка (высота 32px)
+        if (lv_obj_get_height(w) > 32) {
+            lv_obj_set_height(w, 32);
+        } else {
+            // Восстановление: убираем ограничение размера
+            lv_obj_set_size(w, lv_pct(0), lv_pct(0)); // триггер пересчёта
+            lv_obj_update_layout(w);
+        }
+    }, LV_EVENT_CLICKED, win);
+
     // Кнопка "Закрыть"
     lv_obj_t *close_btn = lv_button_create(header);
     lv_obj_set_size(close_btn, 22, 22);
@@ -93,6 +114,30 @@ static void menu_launch_cb(lv_event_t *e) {
     lv_obj_add_flag(start_menu, LV_OBJ_FLAG_HIDDEN);
 }
 
+// Улучшение #3: tooltip при наведении на иконку рабочего стола
+static void desktop_icon_hover_cb(lv_event_t *e) {
+    lv_event_code_t code = lv_event_get_code(e);
+    lv_obj_t *icon_btn = (lv_obj_t *)lv_event_get_target_obj(e);
+
+    // Ищем метку подсказки среди дочерних объектов (последний child = tooltip label)
+    lv_obj_t *tooltip = nullptr;
+    uint32_t child_count = lv_obj_get_child_count(icon_btn);
+    if (child_count > 0) {
+        lv_obj_t *last = lv_obj_get_child(icon_btn, child_count - 1);
+        // tooltip имеет пользовательские данные = 0xTOOLTIP
+        if ((uintptr_t)lv_obj_get_user_data(last) == 0xB00B5) {
+            tooltip = last;
+        }
+    }
+    if (!tooltip) return;
+
+    if (code == LV_EVENT_HOVER_OVER) {
+        lv_obj_remove_flag(tooltip, LV_OBJ_FLAG_HIDDEN);
+    } else if (code == LV_EVENT_HOVER_LEAVE) {
+        lv_obj_add_flag(tooltip, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
 // Создание иконки рабочего стола с поддержкой LVGL-символов
 static void create_desktop_icon(const char *name, const char *cmd, const char *symbol, int x, int y) {
     lv_obj_t *icon_btn = lv_button_create(lv_screen_active());
@@ -111,6 +156,22 @@ static void create_desktop_icon(const char *name, const char *cmd, const char *s
     lv_label_set_text(name_lbl, name);
     lv_obj_align(name_lbl, LV_ALIGN_BOTTOM_MID, 0, -5);
     lv_obj_set_style_text_color(name_lbl, lv_color_hex(0xE6E6E6), LV_PART_MAIN);
+
+    // Улучшение #3: всплывающая подсказка (tooltip) при наведении
+    lv_obj_t *tooltip_lbl = lv_label_create(icon_btn);
+    lv_label_set_text(tooltip_lbl, cmd);
+    lv_obj_set_style_bg_color(tooltip_lbl, lv_color_hex(0x2A2D34), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(tooltip_lbl, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_color(tooltip_lbl, lv_color_hex(0x6FA8DC), LV_PART_MAIN);
+    lv_obj_set_style_border_width(tooltip_lbl, 1, LV_PART_MAIN);
+    lv_obj_set_style_pad_all(tooltip_lbl, 4, LV_PART_MAIN);
+    lv_obj_set_style_text_color(tooltip_lbl, lv_color_hex(0xBBBBBB), LV_PART_MAIN);
+    lv_obj_align(tooltip_lbl, LV_ALIGN_OUT_RIGHT_TOP, 5, 0);
+    lv_obj_add_flag(tooltip_lbl, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_set_user_data(tooltip_lbl, (void *)0xB00B5); // маркер tooltip
+    lv_obj_add_flag(icon_btn, LV_OBJ_FLAG_EVENT_BUBBLE);
+    lv_obj_add_event_cb(icon_btn, desktop_icon_hover_cb, LV_EVENT_HOVER_OVER, nullptr);
+    lv_obj_add_event_cb(icon_btn, desktop_icon_hover_cb, LV_EVENT_HOVER_LEAVE, nullptr);
 
     lv_obj_add_event_cb(icon_btn, [](lv_event_t *e) {
         const char *command = (const char *)lv_event_get_user_data(e);

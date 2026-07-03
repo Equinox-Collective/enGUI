@@ -8,6 +8,11 @@
 #include <string.h>
 #include <stdlib.h>
 
+// Улучшение #1: именованные константы для magic syscall numbers
+// Вместо _syscall(88, ...) и _syscall(87, ...) прямо в коде
+#define SYS_GET_WALL_TIME   87
+#define SYS_BOOT_ANIM_DONE  88
+
 // Параметры фреймбуфера (остаются локальными для main.cpp)
 static uint32_t screen_w = 0;
 static uint32_t screen_h = 0;
@@ -37,7 +42,7 @@ static void my_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_m
     if (!boot_anim_notified) {
         sysgui_log("sysgui: First frame flushed! Notifying boot anim done...\n");
         boot_anim_notified = true;
-        _syscall(88, 0, 0, 0, 0, 0); // SYS_BOOT_ANIM_DONE
+        _syscall(SYS_BOOT_ANIM_DONE, 0, 0, 0, 0, 0);
     }
 }
 
@@ -114,7 +119,7 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
 static void update_system_stats_cb(lv_timer_t *timer) {
     // 1. Время из Unix timestamp
     uint64_t unix_secs = 0;
-    _syscall(87, (uint64_t)&unix_secs, 0, 0, 0, 0); // SYS_GET_WALL_TIME
+    _syscall(SYS_GET_WALL_TIME, (uint64_t)&unix_secs, 0, 0, 0, 0);
     char time_str[32];
     
     if (unix_secs != 0) {
@@ -140,6 +145,18 @@ static void update_system_stats_cb(lv_timer_t *timer) {
     char mem_str[64];
     sprintf(mem_str, "RAM: %d MB / %d MB", (int)(used / (1024 * 1024)), (int)(total / (1024 * 1024)));
     lv_label_set_text(ram_label, mem_str);
+
+    // Улучшение #4: цветовая индикация загрузки RAM
+    // Зелёный < 60%, жёлтый 60–85%, красный > 85%
+    int ram_pct = (total > 0) ? (int)((used * 100) / total) : 0;
+    lv_color_t ram_color;
+    if (ram_pct >= 85)
+        ram_color = lv_color_hex(0xFF5555); // красный — критично
+    else if (ram_pct >= 60)
+        ram_color = lv_color_hex(0xFFCC44); // жёлтый — предупреждение
+    else
+        ram_color = lv_color_hex(0x55CC55); // зелёный — норма
+    lv_obj_set_style_text_color(ram_label, ram_color, LV_PART_MAIN);
 
     if (ram_chart && ram_series) {
         int percent = (int)((used * 100) / total);

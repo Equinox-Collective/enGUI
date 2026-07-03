@@ -94,4 +94,10 @@ void sysgui_execute_app(const char *cmd) {
     _syscall(SYS_EXEC, (uint64_t)cmd, 0, 0, 0, 0);
 }
 
+// Улучшение #6: завершение процесса по PID
+bool sysgui_kill_task(uint64_t pid) {
+    uint64_t ret = _syscall(SYS_TASK_KILL, pid, 0, 0, 0, 0);
+    return (ret == 1);
+}
+
 }

@@ -21,11 +21,17 @@ struct TaskInfo {
     uint64_t cr3;
     uint64_t brk;
     bool running;
+    // Улучшение #5: краткое отображение PID в виде строки для таблицы
+    // (имя процесса ядро не хранит в TaskInfo — используем PID как метку)
+    char label[24]; // формат "PID:<pid>" или просто номер
 };
 
 int sysgui_get_task_list(TaskInfo *list, int max_tasks);
 void sysgui_get_mem_info(uint64_t *used, uint64_t *total);
 void sysgui_execute_app(const char *cmd);
+
+// Улучшение #6: завершение процесса по PID из sysgui
+bool sysgui_kill_task(uint64_t pid);
 
 #ifdef __cplusplus
 }
