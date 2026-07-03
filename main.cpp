@@ -1,27 +1,24 @@
 #include "lvgl.h"
 #include "api_gui.h"
+#include "gui/desktop.h"
+#include "gui/apps/terminal_app.h"
+#include "gui/apps/sysmon_app.h"
 #include <equos.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 
-// Параметры экрана
+// Параметры фреймбуфера (остаются локальными для main.cpp)
 static uint32_t screen_w = 0;
 static uint32_t screen_h = 0;
 static uint32_t screen_pitch = 0;
 static uint32_t *fb_vram = nullptr;
 static bool boot_anim_notified = false;
 
-// Глобальные объекты интерфейса
-static lv_obj_t *clock_label = nullptr;
-static lv_obj_t *ram_label = nullptr;
-static lv_obj_t *start_menu = nullptr;
-static lv_obj_t *process_table = nullptr;
-static lv_obj_t *ram_chart = nullptr;
-static lv_chart_series_t *ram_series = nullptr;
-
-static lv_obj_t *win_terminal = nullptr;
-static lv_obj_t *win_sysmon = nullptr;
+// Утилита для вывода отладочных сообщений в консоль QEMU (COM1)
+static void sysgui_log(const char *msg) {
+    _syscall(SYS_PRINT, (uint64_t)msg, 0, 0, 0, 0);
+}
 
 // --- Дисплейный Flush Callback ---
 static void my_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
@@ -38,6 +35,7 @@ static void my_flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_m
 
     // Гасим бут-анимацию при выводе самого первого кадра
     if (!boot_anim_notified) {
+        sysgui_log("sysgui: First frame flushed! Notifying boot anim done...\n");
         boot_anim_notified = true;
         _syscall(88, 0, 0, 0, 0, 0); // SYS_BOOT_ANIM_DONE
     }
@@ -111,168 +109,20 @@ static void keyboard_read_cb(lv_indev_t *indev, lv_indev_data_t *data) {
     }
 }
 
-// --- Обработчик перетаскивания окна в LVGL v9 ---
-static void win_drag_event_cb(lv_event_t *e) {
-    lv_obj_t *header = (lv_obj_t *)lv_event_get_target_obj(e);
-    lv_obj_t *win = lv_obj_get_parent(header); // Перемещаем родительское окно, а не сам заголовок
-    if (!win) return;
 
-    lv_indev_t *indev = lv_indev_active();
-    if (!indev) return;
-
-    lv_point_t vect;
-    lv_indev_get_vect(indev, &vect);
-    int32_t x = lv_obj_get_x_aligned(win) + vect.x;
-    int32_t y = lv_obj_get_y_aligned(win) + vect.y;
-    lv_obj_set_pos(win, x, y);
-}
-
-// --- Помощник создания кастомных окон ---
-static lv_obj_t *create_custom_window(const char *title, int w, int h, lv_obj_t **out_win) {
-    lv_obj_t *win = lv_obj_create(lv_screen_active());
-    *out_win = win;
-    lv_obj_set_size(win, w, h);
-    lv_obj_set_style_bg_color(win, lv_color_hex(0x1E2127), LV_PART_MAIN);
-    lv_obj_set_style_border_color(win, lv_color_hex(0x4A505C), LV_PART_MAIN);
-    lv_obj_set_style_border_width(win, 2, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(win, 0, LV_PART_MAIN);
-    lv_obj_center(win);
-    lv_obj_add_flag(win, LV_OBJ_FLAG_HIDDEN); // Скрыто по умолчанию
-
-    // Заголовок
-    lv_obj_t *header = lv_obj_create(win);
-    lv_obj_set_size(header, LV_PCT(100), 32);
-    lv_obj_align(header, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(header, lv_color_hex(0x2A2D34), LV_PART_MAIN);
-    lv_obj_set_style_border_width(header, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(header, 5, LV_PART_MAIN);
-    lv_obj_remove_flag(header, LV_OBJ_FLAG_SCROLLABLE);
-    
-    // В LVGL 9 регистрируем перетаскивание через EVENT_PRESSING на заголовке
-    lv_obj_add_event_cb(header, win_drag_event_cb, LV_EVENT_PRESSING, nullptr);
-
-    lv_obj_t *title_lbl = lv_label_create(header);
-    lv_label_set_text(title_lbl, title);
-    lv_obj_align(title_lbl, LV_ALIGN_LEFT_MID, 10, 0);
-    lv_obj_set_style_text_color(title_lbl, lv_color_hex(0xE6E6E6), LV_PART_MAIN);
-
-    // Кнопка закрытия
-    lv_obj_t *close_btn = lv_button_create(header);
-    lv_obj_set_size(close_btn, 22, 22);
-    lv_obj_align(close_btn, LV_ALIGN_RIGHT_MID, -5, 0);
-    lv_obj_set_style_bg_color(close_btn, lv_color_hex(0xDF5B5B), LV_PART_MAIN);
-    lv_obj_add_event_cb(close_btn, [](lv_event_t *e) {
-        lv_obj_t *w = (lv_obj_t *)lv_event_get_user_data(e);
-        lv_obj_add_flag(w, LV_OBJ_FLAG_HIDDEN);
-    }, LV_EVENT_CLICKED, win);
-
-    // Контейнер контента
-    lv_obj_t *content = lv_obj_create(win);
-    lv_obj_set_size(content, LV_PCT(100), h - 32);
-    lv_obj_align(content, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_obj_set_style_bg_color(content, lv_color_hex(0x14161B), LV_PART_MAIN);
-    lv_obj_set_style_border_width(content, 0, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(content, 10, LV_PART_MAIN);
-
-    return content;
-}
-
-// --- Интерактивный Shell Терминал Ядра ---
-static lv_obj_t *term_history = nullptr;
-static void term_input_event_handler(lv_event_t *e) {
-    lv_event_code_t code = lv_event_get_code(e);
-    lv_obj_t *ta = (lv_obj_t *)lv_event_get_target_obj(e);
-    if (code == LV_EVENT_READY) {
-        const char *cmd = lv_textarea_get_text(ta);
-        if (strlen(cmd) == 0) return;
-
-        lv_textarea_add_text(term_history, "\n# ");
-        lv_textarea_add_text(term_history, cmd);
-        lv_textarea_add_text(term_history, "\n");
-
-        // Выполняем в консоли Ring-0 ядра (сисколл 73)
-        char out_buf[1024] = {0};
-        _syscall(73, (uint64_t)cmd, (uint64_t)out_buf, sizeof(out_buf), 0, 0);
-
-        if (strlen(out_buf) > 0) {
-            lv_textarea_add_text(term_history, out_buf);
-        } else {
-            lv_textarea_add_text(term_history, "[Ядро не вернуло ответа]\n");
-        }
-
-        lv_textarea_set_text(ta, "");
-    }
-}
-
-// --- Сборка оконных утилит ---
-static void build_terminal_window() {
-    lv_obj_t *content = create_custom_window("💻 Kernel Console Shell", 480, 360, &win_terminal);
-
-    term_history = lv_textarea_create(content);
-    lv_obj_set_size(term_history, LV_PCT(100), LV_PCT(80));
-    lv_obj_align(term_history, LV_ALIGN_TOP_MID, 0, 0);
-    lv_textarea_set_text(term_history, "--- EquinoxOS GUI Kernel Terminal ---\nВведите 'help' для списка команд ядра.\n");
-    lv_obj_set_style_bg_color(term_history, lv_color_hex(0x0A0B0E), LV_PART_MAIN);
-    lv_obj_set_style_text_color(term_history, lv_color_hex(0x33FF33), LV_PART_MAIN);
-    lv_textarea_set_cursor_click_pos(term_history, false);
-
-    lv_obj_t *term_input = lv_textarea_create(content);
-    lv_obj_set_size(term_input, LV_PCT(100), 32);
-    lv_obj_align(term_input, LV_ALIGN_BOTTOM_MID, 0, 0);
-    lv_textarea_set_one_line(term_input, true);
-    lv_obj_set_style_bg_color(term_input, lv_color_hex(0x14161B), LV_PART_MAIN);
-    lv_obj_set_style_text_color(term_input, lv_color_hex(0xE6E6E6), LV_PART_MAIN);
-    lv_obj_add_event_cb(term_input, term_input_event_handler, LV_EVENT_READY, nullptr);
-}
-
-static void build_sysmon_window() {
-    lv_obj_t *content = create_custom_window("📊 System Statistics & Task Manager", 540, 320, &win_sysmon);
-
-    // Левая колонка: Диспетчер задач
-    process_table = lv_table_create(content);
-    lv_obj_set_size(process_table, LV_PCT(55), LV_PCT(100));
-    lv_obj_align(process_table, LV_ALIGN_LEFT_MID, 0, 0);
-    lv_table_set_col_width(process_table, 0, 45);  // PID
-    lv_table_set_col_width(process_table, 1, 80);  // Status
-    lv_table_set_col_width(process_table, 2, 75);  // Heap limit
-    lv_table_set_col_width(process_table, 3, 75);  // Memory mapping
-    
-    lv_table_set_cell_value(process_table, 0, 0, "PID");
-    lv_table_set_cell_value(process_table, 0, 1, "Status");
-    lv_table_set_cell_value(process_table, 0, 2, "Heap Brk");
-    lv_table_set_cell_value(process_table, 0, 3, "CR3 Page");
-
-    // Правая колонка: RAM Монитор
-    lv_obj_t *ram_title = lv_label_create(content);
-    lv_label_set_text(ram_title, "RAM History (%)");
-    lv_obj_align(ram_title, LV_ALIGN_TOP_RIGHT, -20, 10);
-    lv_obj_set_style_text_color(ram_title, lv_color_hex(0xE6E6E6), LV_PART_MAIN);
-
-    ram_chart = lv_chart_create(content);
-    lv_obj_set_size(ram_chart, LV_PCT(40), LV_PCT(70));
-    lv_obj_align(ram_chart, LV_ALIGN_BOTTOM_RIGHT, 0, -10);
-    lv_chart_set_type(ram_chart, LV_CHART_TYPE_LINE);
-    lv_chart_set_range(ram_chart, LV_CHART_AXIS_PRIMARY_Y, 0, 100);
-    ram_series = lv_chart_add_series(ram_chart, lv_color_hex(0x6FA8DC), LV_CHART_AXIS_PRIMARY_Y);
-}
-
-// --- Системный таймер обновлений (каждую секунду) ---
+// --- Системный таймер обновлений системной статистики (каждую секунду) ---
 static void update_system_stats_cb(lv_timer_t *timer) {
-    // 1. Обновление времени из Unix timestamp
+    // 1. Время из Unix timestamp
     uint64_t unix_secs = 0;
     _syscall(87, (uint64_t)&unix_secs, 0, 0, 0, 0); // SYS_GET_WALL_TIME
     char time_str[32];
     
     if (unix_secs != 0) {
-        // Декодируем Unix-время без зависимости от libc-функций time/localtime/strftime
         uint32_t seconds_in_day = unix_secs % 86400;
         uint32_t hours = seconds_in_day / 3600;
         uint32_t minutes = (seconds_in_day % 3600) / 60;
         uint32_t seconds = seconds_in_day % 60;
-        
-        // Поправка на часовой пояс UTC+3 (МСК)
-        uint32_t local_hours = (hours + 3) % 24; 
-        
+        uint32_t local_hours = (hours + 3) % 24; // UTC+3
         sprintf(time_str, "%02u:%02u:%02u", local_hours, minutes, seconds);
         lv_label_set_text(clock_label, time_str);
     } else {
@@ -282,10 +132,10 @@ static void update_system_stats_cb(lv_timer_t *timer) {
         lv_label_set_text(clock_label, time_str);
     }
 
-    // 2. Обновление системной памяти
+    // 2. RAM
     uint64_t used = 0, total = 0;
     sysgui_get_mem_info(&used, &total);
-    if (total == 0) total = 512 * 1024 * 1024; // fallback
+    if (total == 0) total = 512 * 1024 * 1024;
 
     char mem_str[64];
     sprintf(mem_str, "RAM: %d MB / %d MB", (int)(used / (1024 * 1024)), (int)(total / (1024 * 1024)));
@@ -296,7 +146,7 @@ static void update_system_stats_cb(lv_timer_t *timer) {
         lv_chart_set_next_value(ram_chart, ram_series, percent);
     }
 
-    // 3. Обновление диспетчера задач
+    // 3. Таблица задач
     if (process_table) {
         TaskInfo tasks[20];
         int count = sysgui_get_task_list(tasks, 20);
@@ -316,202 +166,99 @@ static void update_system_stats_cb(lv_timer_t *timer) {
     }
 }
 
-// --- Поведение запускаторов меню и иконок ---
-static void menu_launch_cb(lv_event_t *e) {
-    const char *cmd = (const char *)lv_event_get_user_data(e);
-    if (strcmp(cmd, "win_terminal") == 0) {
-        lv_obj_remove_flag(win_terminal, LV_OBJ_FLAG_HIDDEN);
-    } else if (strcmp(cmd, "win_sysmon") == 0) {
-        lv_obj_remove_flag(win_sysmon, LV_OBJ_FLAG_HIDDEN);
-    } else {
-        sysgui_execute_app(cmd);
-    }
-    lv_obj_add_flag(start_menu, LV_OBJ_FLAG_HIDDEN);
-}
-
-// --- Помощник создания ярлыков рабочего стола ---
-static void create_desktop_icon(const char *name, const char *cmd, const char *symbol, int x, int y) {
-    lv_obj_t *icon_btn = lv_button_create(lv_screen_active());
-    lv_obj_set_size(icon_btn, 80, 80);
-    lv_obj_set_pos(icon_btn, x, y);
-    lv_obj_set_style_bg_color(icon_btn, lv_color_hex(0x2A2D34), LV_PART_MAIN);
-    lv_obj_set_style_border_color(icon_btn, lv_color_hex(0x4A505C), LV_PART_MAIN);
-    lv_obj_set_style_border_width(icon_btn, 1, LV_PART_MAIN);
-
-    lv_obj_t *sym_lbl = lv_label_create(icon_btn);
-    lv_label_set_text(sym_lbl, symbol);
-    lv_obj_align(sym_lbl, LV_ALIGN_TOP_MID, 0, 5);
-    lv_obj_set_style_text_font(sym_lbl, &lv_font_montserrat_14, LV_PART_MAIN); // Иконка
-
-    lv_obj_t *name_lbl = lv_label_create(icon_btn);
-    lv_label_set_text(name_lbl, name);
-    lv_obj_align(name_lbl, LV_ALIGN_BOTTOM_MID, 0, -5);
-    lv_obj_set_style_text_color(name_lbl, lv_color_hex(0xE6E6E6), LV_PART_MAIN);
-
-    lv_obj_add_event_cb(icon_btn, [](lv_event_t *e) {
-        const char *command = (const char *)lv_event_get_user_data(e);
-        if (strcmp(command, "win_terminal") == 0) {
-            lv_obj_remove_flag(win_terminal, LV_OBJ_FLAG_HIDDEN);
-        } else if (strcmp(command, "win_sysmon") == 0) {
-            lv_obj_remove_flag(win_sysmon, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            sysgui_execute_app(command);
-        }
-    }, LV_EVENT_CLICKED, (void *)cmd);
-}
-
-// --- Построение окружения Рабочего Стола ---
-static void build_desktop_ui() {
-    // Стиль фона рабочего стола (Темный минимализм)
-    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x14161B), LV_PART_MAIN);
-
-    // 1. Создание верхней панели управления (Top Bar)
-    lv_obj_t *top_bar = lv_obj_create(lv_screen_active());
-    lv_obj_set_size(top_bar, LV_PCT(100), 38);
-    lv_obj_align(top_bar, LV_ALIGN_TOP_MID, 0, 0);
-    lv_obj_set_style_bg_color(top_bar, lv_color_hex(0x1E2127), LV_PART_MAIN);
-    lv_obj_set_style_border_color(top_bar, lv_color_hex(0x4A505C), LV_PART_MAIN);
-    lv_obj_set_style_border_width(top_bar, 1, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(top_bar, 5, LV_PART_MAIN);
-    lv_obj_remove_flag(top_bar, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Кнопка Старт / "Equinox"
-    lv_obj_t *start_btn = lv_button_create(top_bar);
-    lv_obj_set_size(start_btn, 110, 28);
-    lv_obj_align(start_btn, LV_ALIGN_LEFT_MID, 5, 0);
-    lv_obj_set_style_bg_color(start_btn, lv_color_hex(0x2A2D34), LV_PART_MAIN);
-    
-    lv_obj_t *start_btn_lbl = lv_label_create(start_btn);
-    lv_label_set_text(start_btn_lbl, "🌌 EquinoxOS");
-    lv_obj_center(start_btn_lbl);
-    lv_obj_set_style_text_color(start_btn_lbl, lv_color_hex(0x6FA8DC), LV_PART_MAIN);
-
-    // Часы по центру
-    clock_label = lv_label_create(top_bar);
-    lv_label_set_text(clock_label, "00:00:00");
-    lv_obj_align(clock_label, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_text_color(clock_label, lv_color_hex(0xE6E6E6), LV_PART_MAIN);
-
-    // ОЗУ справа
-    ram_label = lv_label_create(top_bar);
-    lv_label_set_text(ram_label, "RAM: 0MB / 0MB");
-    lv_obj_align(ram_label, LV_ALIGN_RIGHT_MID, -10, 0);
-    lv_obj_set_style_text_color(ram_label, lv_color_hex(0xE6E6E6), LV_PART_MAIN);
-
-    // 2. Создание выпадающего меню "Пуск"
-    start_menu = lv_obj_create(lv_screen_active());
-    lv_obj_set_size(start_menu, 160, 200);
-    lv_obj_set_pos(start_menu, 10, 42);
-    lv_obj_set_style_bg_color(start_menu, lv_color_hex(0x1E2127), LV_PART_MAIN);
-    lv_obj_set_style_border_color(start_menu, lv_color_hex(0x4A505C), LV_PART_MAIN);
-    lv_obj_set_style_border_width(start_menu, 2, LV_PART_MAIN);
-    lv_obj_set_style_pad_all(start_menu, 5, LV_PART_MAIN);
-    lv_obj_add_flag(start_menu, LV_OBJ_FLAG_HIDDEN); // Скрыто
-
-    // Привязываем переключение меню пуск
-    lv_obj_add_event_cb(start_btn, [](lv_event_t *e) {
-        if (lv_obj_has_flag(start_menu, LV_OBJ_FLAG_HIDDEN)) {
-            lv_obj_remove_flag(start_menu, LV_OBJ_FLAG_HIDDEN);
-        } else {
-            lv_obj_add_flag(start_menu, LV_OBJ_FLAG_HIDDEN);
-        }
-    }, LV_EVENT_CLICKED, nullptr);
-
-    // Список приложений в пуске
-    struct MenuItem {
-        const char *name;
-        const char *cmd;
-    } menu_items[] = {
-        {"💻 Terminal", "win_terminal"},
-        {"📊 Stats & Tasks", "win_sysmon"},
-        {"🕹️ Doom Classic", "doom"},
-        {"🌐 Web Browser", "htmlview"},
-        {"🐚 Bash Shell", "bash"},
-        {"🔄 Reboot System", "reboot"}
-    };
-
-    for (size_t i = 0; i < sizeof(menu_items)/sizeof(menu_items[0]); i++) {
-        lv_obj_t *btn = lv_button_create(start_menu);
-        lv_obj_set_size(btn, LV_PCT(100), 28);
-        lv_obj_set_pos(btn, 0, i * 31);
-        lv_obj_set_style_bg_color(btn, lv_color_hex(0x2A2D34), LV_PART_MAIN);
-        
-        lv_obj_t *lbl = lv_label_create(btn);
-        lv_label_set_text(lbl, menu_items[i].name);
-        lv_obj_align(lbl, LV_ALIGN_LEFT_MID, 5, 0);
-        lv_obj_set_style_text_color(lbl, lv_color_hex(0xE6E6E6), LV_PART_MAIN);
-        
-        lv_obj_add_event_cb(btn, menu_launch_cb, LV_EVENT_CLICKED, (void *)menu_items[i].cmd);
-    }
-
-    // 3. Сборка системных окон
-    build_terminal_window();
-    build_sysmon_window();
-
-    // 4. Добавление ярлыков на рабочий стол
-    create_desktop_icon("Terminal", "win_terminal", "💻", 20, 60);
-    create_desktop_icon("Monitor", "win_sysmon", "📊", 20, 160);
-    create_desktop_icon("Doom", "doom", "🕹️", 20, 260);
-
-    // 5. Запуск системного таймера обновления метрик
-    lv_timer_create(update_system_stats_cb, 1000, nullptr);
-}
-
-// --- Главная точка входа ---
 int main(int argc, char **argv) {
+    sysgui_log("sysgui: Starting main() execution...\n");
+
     // 1. Получение информации о VESA LFB через SYS_GET_VESA_INFO
     uint64_t phys_fb = 0;
     _syscall(SYS_GET_VESA_INFO, (uint64_t)&phys_fb, (uint64_t)&screen_w, (uint64_t)&screen_h, (uint64_t)&screen_pitch, 0);
     
+    char vesa_log[128];
+    sprintf(vesa_log, "sysgui: VESA returned w=%d, h=%d, pitch=%d, phys=0x%lx\n", 
+            (int)screen_w, (int)screen_h, (int)screen_pitch, phys_fb);
+    sysgui_log(vesa_log);
+
+    if (screen_w == 0 || screen_h == 0 || phys_fb == 0) {
+        sysgui_log("sysgui: ERROR! VESA params are invalid! Aborting...\n");
+        return -1;
+    }
+
     // Маппинг видеопамяти ядра в адресное пространство Ring 3 приложения
+    sysgui_log("sysgui: Mapping physical VRAM...\n");
     uint32_t fb_size = screen_h * screen_pitch;
     fb_vram = (uint32_t *)_syscall(SYS_MAP_PHYS, phys_fb, fb_size, 0, 0, 0);
 
+    sprintf(vesa_log, "sysgui: fb_vram mapped successfully at virtual %p\n", fb_vram);
+    sysgui_log(vesa_log);
+
     // 2. Инициализация LVGL
+    sysgui_log("sysgui: Initializing LVGL library...\n");
     lv_init();
 
-    // Задаем callback тиков для LVGL на PIT таймер ядра (сисколл 6)
     lv_tick_set_cb([]() -> uint32_t {
         return sysgui_get_time_ms();
     });
 
-    // 3. Создание виртуального дисплея
+    // 3. Создание дисплея
+    sysgui_log("sysgui: Creating virtual display...\n");
     lv_display_t *disp = lv_display_create(screen_w, screen_h);
     lv_display_set_flush_cb(disp, my_flush_cb);
     lv_display_set_color_format(disp, LV_COLOR_FORMAT_ARGB8888);
 
-    // Выделяем 1/10 буфера экрана под частичный программный рендеринг LVGL
     uint32_t draw_buf_size = screen_w * (screen_h / 10);
     uint32_t *buf1 = (uint32_t *)malloc(draw_buf_size * sizeof(uint32_t));
     if (buf1) {
+        sysgui_log("sysgui: Software render buffer allocated successfully.\n");
         lv_display_set_buffers(disp, buf1, nullptr, draw_buf_size * sizeof(uint32_t), LV_DISPLAY_RENDER_MODE_PARTIAL);
+    } else {
+        sysgui_log("sysgui: ERROR! Failed to allocate software render buffer!\n");
+        return -1;
     }
 
     // 4. Регистрация устройств ввода
+    sysgui_log("sysgui: Registering pointer input...\n");
     lv_indev_t *mouse_indev = lv_indev_create();
     lv_indev_set_type(mouse_indev, LV_INDEV_TYPE_POINTER);
     lv_indev_set_read_cb(mouse_indev, mouse_read_cb);
 
+    // Создаем красивую круглую стрелку/точку курсора, независимую от шрифтов
+    lv_obj_t *cursor_obj = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(cursor_obj, 12, 12);
+    lv_obj_set_style_bg_color(cursor_obj, lv_color_hex(0x6FA8DC), LV_PART_MAIN); // Голубой центр
+    lv_obj_set_style_border_color(cursor_obj, lv_color_hex(0xFFFFFF), LV_PART_MAIN); // Белый кант
+    lv_obj_set_style_border_width(cursor_obj, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(cursor_obj, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_indev_set_cursor(mouse_indev, cursor_obj); // Назначаем курсор диспетчеру ввода
+
+    // Клавиатура
+    sysgui_log("sysgui: Registering keypad input...\n");
     lv_indev_t *kb_indev = lv_indev_create();
     lv_indev_set_type(kb_indev, LV_INDEV_TYPE_KEYPAD);
     lv_indev_set_read_cb(kb_indev, keyboard_read_cb);
 
-    // 5. Сборка всего интерфейса
-    build_desktop_ui();
+    lv_group_t *kb_group = lv_group_create();
+    lv_group_set_default(kb_group);
+    lv_indev_set_group(kb_indev, kb_group);
 
-    // 6. Основной цикл выполнения окружения
+    // 5. Инициализация UI модулей
+    sysgui_log("sysgui: Building Desktop interface elements...\n");
+    desktop_init();
+    terminal_app_init();
+    sysmon_app_init();
+
+    // Запуск системного таймера обновления метрик
+    lv_timer_create(update_system_stats_cb, 1000, nullptr);
+
+    sysgui_log("sysgui: Main loop started! Entering execution cycle...\n");
+
+    // 6. Главный цикл
     while (true) {
-        // Умная пауза: если на переднем плане запущен Doom, не перерисовываем GUI
-        // для предотвращения жесткого мерцания фреймбуфера
         if (sysgui_is_fg_app_active()) {
             sysgui_sleep_ms(100);
             continue;
         }
 
-        // Вызов обработчика LVGL
         lv_timer_handler();
-
-        // Уступаем CPU планировщику на 10 мс
         sysgui_sleep_ms(10);
     }
 

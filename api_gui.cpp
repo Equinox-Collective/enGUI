@@ -1,12 +1,39 @@
 #include "api_gui.h"
 #include <equos.h>
+#include <stdio.h>
 
 extern "C" {
 
-// Проверка активности полноэкранного приложения (например, Doom)
 bool sysgui_is_fg_app_active() {
     uint64_t fg_pid = _syscall(SYS_GET_FG_APP, 0, 0, 0, 0, 0);
-    return (fg_pid != 0);
+    uint64_t my_pid = sys_getpid();
+
+    // Если фокуса нет или он у нас — мы активны
+    if (fg_pid == 0 || fg_pid == my_pid) {
+        return false;
+    }
+
+    // Проверяем по списку задач ядра: существует ли ещё процесс с таким PID?
+    TaskInfo list[32];
+    int count = sysgui_get_task_list(list, 32);
+    bool found_and_running = false;
+
+    for (int i = 0; i < count; i++) {
+        if (list[i].pid == fg_pid && list[i].running) {
+            found_and_running = true;
+            break;
+        }
+    }
+
+    if (!found_and_running) {
+        // Залогируем в последовательный порт, что мы перехватили фокус у умершего процесса
+        char log_buf[64];
+        sprintf(log_buf, "sysgui: Force wake! Process %d is dead.\n", (int)fg_pid);
+        _syscall(SYS_PRINT, (uint64_t)log_buf, 0, 0, 0, 0);
+        return false;
+    }
+
+    return true; 
 }
 
 // Прямой опрос мыши ядра (забираем rax, rbx, rcx)
