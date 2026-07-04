@@ -11,11 +11,11 @@ LVGL_LIB = $(LVGL_DIR)/liblvgl.a
 
 CXXFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
            -fno-omit-frame-pointer -fno-exceptions -fno-rtti -fno-threadsafe-statics \
-           -I$(SDK_DIR)/include -O2 -std=c++17 -MMD -MP \
+           -I../../third_party/musl/include -I$(SDK_DIR)/include -O2 -std=c++17 -MMD -MP \
            -I$(LVGL_DIR) -I. -DLV_CONF_INCLUDE_SIMPLE
 
 CFLAGS = -ffreestanding -mcmodel=small -mno-red-zone -fno-stack-protector -fno-pic -g \
-         -fno-omit-frame-pointer -I$(SDK_DIR)/include -O2 -MMD -MP \
+         -fno-omit-frame-pointer -I../../third_party/musl/include -I$(SDK_DIR)/include -O2 -MMD -MP \
          -I$(LVGL_DIR) -I. -DLV_CONF_INCLUDE_SIMPLE
 
 LDFLAGS = -nostdlib -T app.ld
