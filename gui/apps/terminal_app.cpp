@@ -1,7 +1,10 @@
 #include "terminal_app.h"
 #include "../desktop.h"
 #include <equos.h>
-#include <string.h>
+#include <string>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
 #include <unistd.h>
 #include <sys/wait.h>
 
@@ -21,13 +24,13 @@ static int equos_poll(struct equos_pollfd *fds, int nfds, int timeout_ms) {
     long ret;
     __asm__ volatile("int $0x81"
         : "=a"(ret)
-        : "a"(7L), "D"((uint64_t)fds), "S"((long)nfds), "d"((long)timeout_ms)
+        : "a"((long)7), "D"((uint64_t)fds), "S"((long)nfds), "d"((long)timeout_ms)
         : "rcx", "r11", "memory");
     return (int)ret;
 }
 
 lv_obj_t *win_terminal = nullptr;
-static lv_obj_t *term_history = nullptr;
+static lv_obj_t *term_label = nullptr;
 
 static pid_t shell_pid = -1;
 static int shell_stdin_w = -1;   /* write commands to sh.elf */
@@ -35,45 +38,229 @@ static int shell_stdout_r = -1;  /* read output from sh.elf */
 static bool shell_running = false;
 static lv_timer_t *shell_poll_timer = nullptr;
 
-/* Translate standard ANSI SGR sequences to native LVGL recolor tags, handle Backspaces */
-static void term_append_output_with_control(const char *text, size_t len) {
-    if (!term_history || !text || len == 0) return;
+// TTY Terminal Buffer Configuration
+#define TERM_ROWS 20
+#define TERM_COLS 75
 
-    for (size_t i = 0; i < len; i++) {
-        char c = text[i];
-        
-        if (c == '\b') {
-            // Стираем последний символ перед курсором (стандартный Backspace)
-            lv_textarea_delete_char(term_history);
-        } else if (c == '\x1b' && i + 1 < len && text[i + 1] == '[') {
-            // Парсер ANSI SGR цветов
-            size_t seq_start = i;
-            i += 2;
-            size_t cmd_start = i;
-            while (i < len && text[i] != 'm') i++;
-            
-            if (i < len && text[i] == 'm') {
-                // Переводим цвета ANSI в теги реколора LVGL (#rrggbb)
-                if (strncmp(&text[cmd_start], "32", 2) == 0) {
-                    lv_textarea_add_text(term_history, "#33FF33 "); // Зеленый промпт
-                } else if (strncmp(&text[cmd_start], "36", 2) == 0) {
-                    lv_textarea_add_text(term_history, "#6FA8DC "); // Голубой баннер
-                } else if (strncmp(&text[cmd_start], "34", 2) == 0) {
-                    lv_textarea_add_text(term_history, "#5588FF "); // Синий CWD
-                } else if (strncmp(&text[cmd_start], "31", 2) == 0) {
-                    lv_textarea_add_text(term_history, "#FF5555 "); // Красные ошибки
-                } else if (strncmp(&text[cmd_start], "0", 1) == 0) {
-                    lv_textarea_add_text(term_history, "#");        // Сброс цвета
-                }
+struct TerminalCell {
+    char c = ' ';
+    uint32_t fg = 0x33FF33; // Default matrix green
+};
+
+struct TerminalEmulator {
+    TerminalCell grid[TERM_ROWS][TERM_COLS];
+    int cursor_y = 0;
+    int cursor_x = 0;
+    uint32_t current_fg = 0x33FF33;
+
+    enum ParserState {
+        STATE_NORMAL,
+        STATE_ESC,
+        STATE_CSI
+    } state = STATE_NORMAL;
+
+    char csi_buf[64];
+    int csi_len = 0;
+
+    void clear() {
+        for (int r = 0; r < TERM_ROWS; r++) {
+            for (int c = 0; c < TERM_COLS; c++) {
+                grid[r][c].c = ' ';
+                grid[r][c].fg = 0x33FF33;
             }
-        } else {
-            // Обычный символ — выводим на экран
-            char buf[2] = {c, '\0'};
-            lv_textarea_add_text(term_history, buf);
+        }
+        cursor_y = 0;
+        cursor_x = 0;
+        state = STATE_NORMAL;
+    }
+
+    void scroll() {
+        for (int r = 0; r < TERM_ROWS - 1; r++) {
+            std::memcpy(grid[r], grid[r + 1], sizeof(TerminalCell) * TERM_COLS);
+        }
+        for (int c = 0; c < TERM_COLS; c++) {
+            grid[TERM_ROWS - 1][c].c = ' ';
+            grid[TERM_ROWS - 1][c].fg = 0x33FF33;
+        }
+        cursor_y = TERM_ROWS - 1;
+    }
+
+    void write_char(char c) {
+        switch (state) {
+            case STATE_NORMAL:
+                if (c == '\x1b') {
+                    state = STATE_ESC;
+                } else if (c == '\n') {
+                    cursor_x = 0;
+                    cursor_y++;
+                    if (cursor_y >= TERM_ROWS) {
+                        scroll();
+                    }
+                } else if (c == '\r') {
+                    cursor_x = 0;
+                } else if (c == '\b' || c == 127) {
+                    if (cursor_x > 0) {
+                        cursor_x--;
+                    }
+                } else if (c == '\t') {
+                    int next_tab = (cursor_x + 8) & ~7;
+                    while (cursor_x < next_tab && cursor_x < TERM_COLS) {
+                        grid[cursor_y][cursor_x].c = ' ';
+                        grid[cursor_y][cursor_x].fg = current_fg;
+                        cursor_x++;
+                    }
+                    if (cursor_x >= TERM_COLS) {
+                        cursor_x = 0;
+                        cursor_y++;
+                        if (cursor_y >= TERM_ROWS) scroll();
+                    }
+                } else if ((unsigned char)c >= 32) {
+                    grid[cursor_y][cursor_x].c = c;
+                    grid[cursor_y][cursor_x].fg = current_fg;
+                    cursor_x++;
+                    if (cursor_x >= TERM_COLS) {
+                        cursor_x = 0;
+                        cursor_y++;
+                        if (cursor_y >= TERM_ROWS) {
+                            scroll();
+                        }
+                    }
+                }
+                break;
+
+            case STATE_ESC:
+                if (c == '[') {
+                    state = STATE_CSI;
+                    csi_len = 0;
+                    std::memset(csi_buf, 0, sizeof(csi_buf));
+                } else {
+                    state = STATE_NORMAL;
+                }
+                break;
+
+            case STATE_CSI:
+                if ((c >= '0' && c <= '9') || c == ';') {
+                    if (csi_len < (int)sizeof(csi_buf) - 1) {
+                        csi_buf[csi_len++] = c;
+                    }
+                } else {
+                    csi_buf[csi_len] = '\0';
+                    process_csi(c);
+                    state = STATE_NORMAL;
+                }
+                break;
         }
     }
-    // Всегда удерживаем скролл в самом низу
-    lv_textarea_set_cursor_pos(term_history, LV_TEXTAREA_CURSOR_LAST);
+
+    void process_csi(char cmd) {
+        if (cmd == 'm') {
+            if (csi_len == 0) {
+                current_fg = 0x33FF33;
+                return;
+            }
+            char* token = std::strtok(csi_buf, ";");
+            while (token != nullptr) {
+                int val = std::atoi(token);
+                if (val == 0) {
+                    current_fg = 0xE6E6E6; // Reset to soft gray-white
+                } else if (val == 30) {
+                    current_fg = 0x1A1A1A; // Dark Black
+                } else if (val == 31) {
+                    current_fg = 0xFF5555; // Red
+                } else if (val == 32) {
+                    current_fg = 0x33FF33; // Green
+                } else if (val == 33) {
+                    current_fg = 0xFFFF55; // Yellow
+                } else if (val == 34) {
+                    current_fg = 0x5588FF; // Blue
+                } else if (val == 35) {
+                    current_fg = 0xFF55FF; // Magenta
+                } else if (val == 36) {
+                    current_fg = 0x6FA8DC; // Cyan
+                } else if (val == 37) {
+                    current_fg = 0xE6E6E6; // White
+                } else if (val == 39) {
+                    current_fg = 0x33FF33; // Reset to green
+                }
+                token = std::strtok(nullptr, ";");
+            }
+        } else if (cmd == 'J') {
+            int val = std::atoi(csi_buf);
+            if (val == 2) {
+                clear();
+            }
+        } else if (cmd == 'H' || cmd == 'f') {
+            int r = 1, col = 1;
+            char* semi = std::strchr(csi_buf, ';');
+            if (semi) {
+                *semi = '\0';
+                r = std::atoi(csi_buf);
+                col = std::atoi(semi + 1);
+            } else if (csi_len > 0) {
+                r = std::atoi(csi_buf);
+            }
+            cursor_y = r - 1;
+            cursor_x = col - 1;
+            if (cursor_y < 0) cursor_y = 0;
+            if (cursor_y >= TERM_ROWS) cursor_y = TERM_ROWS - 1;
+            if (cursor_x < 0) cursor_x = 0;
+            if (cursor_x >= TERM_COLS) cursor_x = TERM_COLS - 1;
+        } else if (cmd == 'K') {
+            for (int c = cursor_x; c < TERM_COLS; c++) {
+                grid[cursor_y][c].c = ' ';
+                grid[cursor_y][c].fg = current_fg;
+            }
+        }
+    }
+};
+
+static TerminalEmulator g_term;
+
+static void term_render_to_ui() {
+    if (!term_label) return;
+
+    std::string out;
+    out.reserve(TERM_ROWS * TERM_COLS * 5);
+
+    for (int r = 0; r < TERM_ROWS; r++) {
+        uint32_t last_fg = 0xFFFFFFFF;
+        for (int c = 0; c < TERM_COLS; c++) {
+            bool is_cursor = (r == g_term.cursor_y && c == g_term.cursor_x);
+            uint32_t fg = g_term.grid[r][c].fg;
+            char ch = g_term.grid[r][c].c;
+
+            if (is_cursor) {
+                out += "#FFFFFF █#"; // Character reverse visual block cursor
+                last_fg = 0xFFFFFFFF;
+            } else {
+                if (fg != last_fg) {
+                    char color_tag[32];
+                    std::snprintf(color_tag, sizeof(color_tag), "#%06X ", fg & 0xFFFFFF);
+                    out += color_tag;
+                    last_fg = fg;
+                }
+                if (ch == '#') {
+                    out += "##"; // Escape recolor prefix
+                } else if (ch == '\0' || ch == ' ') {
+                    out += " ";
+                } else {
+                    out += ch;
+                }
+            }
+        }
+        out += "\n";
+    }
+
+    lv_label_set_text(term_label, out.c_str());
+}
+
+static void term_append_output_with_control(const char *text, size_t len) {
+    if (!term_label || !text || len == 0) return;
+
+    for (size_t i = 0; i < len; i++) {
+        g_term.write_char(text[i]);
+    }
+    term_render_to_ui();
 }
 
 static void term_on_shell_exit(void) {
@@ -165,8 +352,6 @@ static bool spawn_sh_in_terminal(void) {
     return true;
 }
 
-// Перехватчик клавиатуры: перенаправляет нажатия прямо в stdin шелла
-// Перехватчик клавиатуры: перенаправляет нажатия прямо в stdin шелла
 static void term_key_event_handler(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
     if (code != LV_EVENT_KEY) return;
@@ -179,51 +364,42 @@ static void term_key_event_handler(lv_event_t *e) {
     if (key == LV_KEY_ENTER) {
         c = '\n';
     } else if (key == LV_KEY_BACKSPACE) {
-        c = '\b'; // Отправляем Backspace шеллу
+        c = '\b'; 
     } else if (key >= 32 && key <= 126) {
-        c = (char)key; // Любой печатный ASCII символ
+        c = (char)key; 
     }
 
     if (c != 0) {
         write(shell_stdin_w, &c, 1);
     }
 
-    // ОСТАНАВЛИВАЕМ ДЕФОЛТНУЮ ОБРАБОТКУ:
-    // Текстовое поле само не будет печатать символы и стирать их!
     lv_event_stop_processing(e); 
 }
 
 void terminal_app_init() {
     lv_obj_t *content = create_custom_window("Terminal - sh.elf", 520, 380, &win_terminal);
 
-    // Терминал на всю контентную область
-    term_history = lv_textarea_create(content);
-    lv_obj_set_size(term_history, LV_PCT(100), LV_PCT(100));
-    lv_obj_align(term_history, LV_ALIGN_TOP_MID, 0, 0);
-    
-    // Защита от ручного изменения пользователем, писать можно только через ядро
-    lv_textarea_set_cursor_click_pos(term_history, false);
-    lv_textarea_set_one_line(term_history, false);
+    // Dark terminal canvas styling
+    lv_obj_set_style_bg_color(content, lv_color_hex(0x0A0B0E), LV_PART_MAIN);
 
-    lv_obj_set_style_bg_color(term_history, lv_color_hex(0x0A0B0E), LV_PART_MAIN);
-    lv_obj_set_style_text_color(term_history, lv_color_hex(0x33FF33), LV_PART_MAIN);
+    g_term.clear();
 
-    // Включаем поддержку recolor для перевода ANSI-цветов в теги LVGL
-    lv_obj_t *label = lv_textarea_get_label(term_history);
-    if (label) {
-        lv_label_set_recolor(label, true);
-    }
+    // Monospace label setup inside the container
+    term_label = lv_label_create(content);
+    lv_obj_set_size(term_label, LV_PCT(100), LV_PCT(100));
+    lv_obj_align(term_label, LV_ALIGN_TOP_LEFT, 5, 5);
+    lv_label_set_recolor(term_label, true);
 
-    // Регистрируем перехват клавиш
-    lv_obj_add_event_cb(term_history, term_key_event_handler, LV_EVENT_KEY, nullptr);
+    // Style the text
+    lv_obj_set_style_text_color(term_label, lv_color_hex(0x33FF33), LV_PART_MAIN);
 
-    // Выводим приветствие
-    term_append_output_with_control("--- EquinoxOS Terminal (sh.elf interactive) ---\nLaunching /bin/sh.elf...\n", 80);
+    // Add keyboard hook directly on label
+    lv_obj_add_event_cb(term_label, term_key_event_handler, LV_EVENT_KEY, nullptr);
+    lv_obj_add_flag(term_label, LV_OBJ_FLAG_CLICKABLE);
+    lv_group_focus_obj(term_label);
 
     shell_poll_timer = lv_timer_create(shell_poll_cb, 50, nullptr);
 
     spawn_sh_in_terminal();
-
-    // Переводим фокус на терминал, чтобы можно было писать сразу
-    lv_group_focus_obj(term_history);
+    term_render_to_ui();
 }
