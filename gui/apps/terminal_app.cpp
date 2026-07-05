@@ -166,6 +166,7 @@ static bool spawn_sh_in_terminal(void) {
 }
 
 // Перехватчик клавиатуры: перенаправляет нажатия прямо в stdin шелла
+// Перехватчик клавиатуры: перенаправляет нажатия прямо в stdin шелла
 static void term_key_event_handler(lv_event_t *e) {
     lv_event_code_t code = lv_event_get_code(e);
     if (code != LV_EVENT_KEY) return;
@@ -186,6 +187,10 @@ static void term_key_event_handler(lv_event_t *e) {
     if (c != 0) {
         write(shell_stdin_w, &c, 1);
     }
+
+    // ОСТАНАВЛИВАЕМ ДЕФОЛТНУЮ ОБРАБОТКУ:
+    // Текстовое поле само не будет печатать символы и стирать их!
+    lv_event_stop_processing(e); 
 }
 
 void terminal_app_init() {
@@ -197,7 +202,6 @@ void terminal_app_init() {
     lv_obj_align(term_history, LV_ALIGN_TOP_MID, 0, 0);
     
     // Защита от ручного изменения пользователем, писать можно только через ядро
-    lv_textarea_set_readonly(term_history, true);
     lv_textarea_set_cursor_click_pos(term_history, false);
     lv_textarea_set_one_line(term_history, false);
 
